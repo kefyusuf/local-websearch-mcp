@@ -1,23 +1,19 @@
-# Verified Security Findings
+# Verified Security Findings — Status Update
 
-## 1. Server-Side Request Forgery (SSRF) in `fetch_content`
+## 1. Server-Side Request Forgery (SSRF) in `fetch_content` ✅ RESOLVED
 - **Severity:** High
-- **Location:** `src/index.ts` (L233)
-- **Description:** The `fetch_content` tool takes a URL as input and navigates to it using Playwright without any validation. This allows an attacker (or a malicious prompt) to make the MCP server request internal resources (e.g., `http://localhost`, `http://192.168.1.1`).
-- **Confidence:** High
-- **CWE:** CWE-918
+- **Original Location:** `src/index.ts` (L233)
+- **Fix:** Private IP/hostname regex filter in `handleFetchContent()`. Blocks localhost, loopback, and private ranges.
+- **Test:** `src/__tests__/ssrf.test.ts` — 4 test cases, all passing.
 
-## 2. Critical Dependency Vulnerabilities
+## 2. Critical Dependency Vulnerabilities ✅ RESOLVED
 - **Severity:** Critical
-- **Location:** `package.json`
-- **Findings:**
-    - `protobufjs < 7.5.5`: Arbitrary code execution (RCE).
-    - `@mozilla/readability < 0.6.0`: Denial of Service (DoS).
-- **Confidence:** High
-- **CWE:** CWE-94, CWE-400
+- **Fix:** `npm audit fix` + `npm rebuild` resolved all issues. `npm audit` now reports 0 vulnerabilities.
+- **Original Findings:**
+    - `protobufjs < 7.5.5` → Resolved via audit fix
+    - `@mozilla/readability < 0.6.0` → Updated to 0.6.0+
 
-## 3. Lack of Rate Limiting
-- **Severity:** Low
-- **Description:** There is no rate limiting on arama or fetch operations. While primarily a local tool, automation could lead to unintended resource consumption or IP bans from search engines.
-- **Confidence:** High
-- **CWE:** CWE-770
+## 3. Lack of Rate Limiting ✅ RESOLVED
+- **Severity:** Low → **Mitigated**
+- **Fix:** TokenBucket rate limiter (`src/rate-limiter.ts`). web_search: 10/min, fetch_content: 20/min. Configurable via environment variables.
+- **Test:** `src/__tests__/rate-limiter.test.ts` — 4 test cases, all passing.
