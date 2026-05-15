@@ -13,6 +13,7 @@ import iconv from "iconv-lite";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
+import { CrossLingualEngine } from "./cache/crosslingual.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 
 // --- Types & Schemas ---
@@ -33,6 +34,7 @@ class WebSearchServer {
   private browser: Browser | null = null;
   private turndown: TurndownService;
   private cache: SemanticCache;
+  private crossLingual: CrossLingualEngine;
   private searchLimiter: TokenBucket;
   private fetchLimiter: TokenBucket;
 
@@ -59,6 +61,7 @@ class WebSearchServer {
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore("websearch_cache.db");
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
+    this.crossLingual = new CrossLingualEngine();
     this.searchLimiter = createSearchRateLimiter();
     this.fetchLimiter = createFetchRateLimiter();
 
@@ -145,19 +148,44 @@ class WebSearchServer {
             };
           }
 
-          // 3. Perform Search (with Fallback)
-          // For technical queries, we use a broader search strategy
+          // 3. Detect language for cross-lingual search
+          const lang = await this.crossLingual.detectLanguage(query);
+          console.error(`Detected Language: ${lang}`);
+
+          // 4. Cross-lingual search for non-English technical queries
+          if (this.crossLingual.shouldCrossSearch(intent, lang)) {
+            const enQuery = await this.crossLingual.translateToEnglish(query, lang);
+            console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
+
+            const [mainResults, auxResults] = await Promise.all([
+              this.performSearch(query),
+              this.performSearch(enQuery),
+            ]);
+
+            const seen = new Set<string>();
+            const merged = [...mainResults, ...auxResults].filter(r => {
+              const key = r.url.toLowerCase();
+              if (seen.has(key)) return false;
+              seen.add(key);
+              return true;
+            });
+
+            const rankedResults = await this.cache.reRankResults(query, merged);
+            await this.cache.set(query, rankedResults);
+            return {
+              content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+            };
+          }
+
+          // 5. Standard Search (with Fallback)
           const results = await this.handleWebSearch(query);
-          
-          // 3. Semantic Re-ranking
+           
+          // 6. Semantic Re-ranking
           if (results.content[0].type === "text") {
             try {
               const parsedResults = JSON.parse(results.content[0].text);
               const rankedResults = await this.cache.reRankResults(query, parsedResults);
-              
-              // 4. Save to Cache
               await this.cache.set(query, rankedResults);
-              
               return {
                 content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
               };
@@ -165,7 +193,7 @@ class WebSearchServer {
               return results;
             }
           }
-          
+           
           return results;
         } else if (name === "fetch_content") {
           const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
