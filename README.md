@@ -1,21 +1,23 @@
 # My Web Search MCP Server
 
-Bu proje, dış API bağımlılığı olmadan çalışan, yüksek performanslı ve yapay zeka destekli bir MCP (Model Context Protocol) sunucusudur.
+A high-performance, AI-powered MCP (Model Context Protocol) server for web search and content fetching — no external API keys required. Runs entirely offline using local models.
 
-## Özellikler
+## Features
 
-- **Browser Context Pooling:** Tarayıcı arka planda sıcak tutulur, her aramada sıfırdan açılmaz.
-- **Yerel Vektör İndeksleme (sqlite-vec):** On binlerce kayıt arasında anlamsal arama C-level performansıyla yapılır.
-- **Search Intent Classification:** Sorgunun niyetini (Haber, Teknik, Genel) yerel modelle anlar ve cache stratejisini buna göre ayarlar.
-- **Cross-lingual Search:** Teknik İngilizce olmayan sorguları otomatik tespit eder, çevirir ve İngilizce + orijinal dilde paralel arama yaparak sonuçları birleştirir.
-- **Hata Toleransı (Fallback):** Brave Search → Google → DuckDuckGo Lite sırasıyla otomatik fallback.
-- **Güvenlik (SSRF Protection):** Yerel/private ağ kaynaklarına erişimi engelleyen güvenlik filtresi.
-- **Rate Limiting:** Token bucket tabanlı rate limiting (web_search: 10/dk, fetch_content: 20/dk, env var ile ayarlanabilir).
-- **Encoding Detection:** Meta charset tag'inden otomatik karakter kodlaması tespiti (ISO-8859-9, Windows-1254 vb.).
+- **Browser Context Pooling:** Persistent browser instance — no cold start on every search.
+- **Vector Indexing (sqlite-vec):** Semantic search across thousands of records with C-level performance.
+- **Search Intent Classification:** Classifies queries as Technical, News, or General to optimize cache TTL and search strategy.
+- **Cross-lingual Search:** Detects non-English technical queries, translates them, and performs parallel search in both languages. Results are merged and re-ranked.
+- **Search Engine Fallback:** Brave Search → Google → DuckDuckGo Lite with automatic failover.
+- **SSRF Protection:** Blocks access to local/private network resources for security.
+- **Rate Limiting:** Token bucket rate limiter (configurable via environment variables).
+- **Encoding Detection:** Automatic charset detection from meta tags (ISO-8859-9, Windows-1254, etc.).
+- **Semantic Caching:** Content fetched from URLs is cached with smart TTL based on content category.
+- **Responsible Scraping:** Rate-limited, polite user-agent, single persistent browser context.
 
-## Kurulum
+## Installation
 
-Gereksinim: Node.js >= 18
+Requires Node.js >= 18
 
 ```bash
 npm install
@@ -23,16 +25,18 @@ npx playwright install chromium
 npm run build
 ```
 
-> Ilk calistirmada Transformers.js modelleri otomatik indirilir (~500 MB, sadece bir kere). Indirme sirasinda sunucu yanit vermez, sonraki baslatmalar anlik olur.
+> On first run, Transformers.js models are downloaded automatically (~500 MB, one-time). The server will not respond during download. Subsequent starts are instant.
 
-## MCP Client Yapilandirmasi (ornek)
+## MCP Client Configuration
+
+Add to your MCP client config (e.g. `claude_desktop_config.json`):
 
 ```json
 {
   "mcpServers": {
     "websearch": {
       "command": "node",
-      "args": ["E:/projects/my-websearch-mcp/build/index.js"],
+      "args": ["path/to/my-websearch-mcp/build/index.js"],
       "env": {
         "RATE_LIMIT_SEARCH_PER_MIN": "10",
         "RATE_LIMIT_FETCH_PER_MIN": "20"
@@ -42,32 +46,44 @@ npm run build
 }
 ```
 
-## Araçlar
+## Tools
 
-1. `web_search` — Akıllı sıralama, niyet algılama, cross-lingual arama ve semantic re-ranking ile web'de arama yapar.
-2. `fetch_content` — URL içeriğini temiz Markdown olarak getirir (akıllı TTL, encoding detection ve cache desteğiyle).
+| Tool | Description |
+|------|-------------|
+| `web_search` | Searches the web with intent classification, cross-lingual support, semantic re-ranking, and multi-engine fallback. |
+| `fetch_content` | Fetches a URL and returns clean Markdown with smart TTL caching and charset detection. |
 
-## Test
+## Testing
 
 ```bash
-npm test            # Tek seferlik
-npm run test:watch  # Watch mode
-npm run test:coverage # Coverage raporu
+npm test              # Single run
+npm run test:watch    # Watch mode
+npm run test:coverage # Coverage report
 ```
 
-## Teknik Altyapı
+## Tech Stack
 
-- **Embedding:** `Xenova/paraphrase-multilingual-MiniLM-L12-v2`
-- **Intent:** `Xenova/nli-deberta-v3-xsmall`
-- **Lang Detect:** `onnx-community/language_detection-ONNX`
-- **Translation:** `Xenova/opus-mt-tr-en` (on-demand, yeni diller için genişletilebilir registry)
-- **Database:** SQLite + `sqlite-vec` extension
-- **Scraper:** Playwright (persistent instance)
-- **Test:** vitest
+| Component | Technology |
+|-----------|-----------|
+| Embedding | `Xenova/paraphrase-multilingual-MiniLM-L12-v2` (384-dim, 50+ languages) |
+| Intent Classification | `Xenova/nli-deberta-v3-xsmall` (zero-shot) |
+| Language Detection | `onnx-community/language_detection-ONNX` (200 languages, FLORES-200) |
+| Translation | `Xenova/opus-mt-tr-en` (on-demand, expandable registry) |
+| Vector Search | SQLite + `sqlite-vec` extension (C-level native, JS fallback) |
+| Browser Automation | Playwright (persistent instance, context pooling) |
+| Content Cleaning | `@mozilla/readability` + JSDOM + Turndown |
+| Encoding | `iconv-lite` (meta charset-based detection) |
+| Test Runner | vitest |
 
 ## Rate Limiting
 
-| Araç | Default | Çevre Değişkeni |
-|------|---------|-----------------|
-| web_search | 10/dk | `RATE_LIMIT_SEARCH_PER_MIN` |
-| fetch_content | 20/dk | `RATE_LIMIT_FETCH_PER_MIN` |
+| Tool | Default | Environment Variable |
+|------|---------|---------------------|
+| `web_search` | 10/min | `RATE_LIMIT_SEARCH_PER_MIN` |
+| `fetch_content` | 20/min | `RATE_LIMIT_FETCH_PER_MIN` |
+
+Rate limiter uses a token bucket algorithm. Burst capacity is 5 tokens. When exceeded, the client receives an error with a retry-after hint.
+
+## License
+
+ISC
