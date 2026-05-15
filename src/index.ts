@@ -13,6 +13,7 @@ import iconv from "iconv-lite";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
+import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 
 // --- Types & Schemas ---
 
@@ -32,6 +33,8 @@ class WebSearchServer {
   private browser: Browser | null = null;
   private turndown: TurndownService;
   private cache: SemanticCache;
+  private searchLimiter: TokenBucket;
+  private fetchLimiter: TokenBucket;
 
   constructor() {
     this.server = new Server(
@@ -56,6 +59,8 @@ class WebSearchServer {
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore("websearch_cache.db");
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
+    this.searchLimiter = createSearchRateLimiter();
+    this.fetchLimiter = createFetchRateLimiter();
 
     this.setupTools();
     this.setupShutdownHandlers();
@@ -117,6 +122,15 @@ class WebSearchServer {
 
       try {
         if (name === "web_search") {
+          const { allowed, retryAfterMs } = this.searchLimiter.tryConsume();
+          if (!allowed) {
+            const seconds = Math.ceil(retryAfterMs / 1000);
+            return {
+              content: [{ type: "text", text: `Rate limit exceeded: web_search allows ${process.env.RATE_LIMIT_SEARCH_PER_MIN || "10"} requests per minute. Retry in ${seconds} seconds.` }],
+              isError: true,
+            };
+          }
+
           const { query } = SearchSchema.parse(args);
           
           // 1. Detect Intent (Technical, News, etc.)
@@ -154,6 +168,15 @@ class WebSearchServer {
           
           return results;
         } else if (name === "fetch_content") {
+          const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
+          if (!allowed) {
+            const seconds = Math.ceil(retryAfterMs / 1000);
+            return {
+              content: [{ type: "text", text: `Rate limit exceeded: fetch_content allows ${process.env.RATE_LIMIT_FETCH_PER_MIN || "20"} requests per minute. Retry in ${seconds} seconds.` }],
+              isError: true,
+            };
+          }
+
           const { url, force_refresh } = FetchSchema.parse(args);
           
           // 1. Check Content Cache
