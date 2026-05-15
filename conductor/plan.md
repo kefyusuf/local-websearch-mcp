@@ -31,38 +31,20 @@ Create a standalone MCP (Model Context Protocol) server that performs web search
   3. `turndown` converts the Readability output into Markdown.
 - **Output**: The clean Markdown text of the webpage.
 
-## Phase 2: Advanced Features (Current)
+## Phase 2: Advanced Features ✅ COMPLETED
+- 2.1 Content Persistence — Done
+- 2.2 Semantic Re-ranking — Done
+- 2.3 Search Engine Fallback (Brave → Google → DuckDuckGo) — Done
 
-### 2.1 Content Persistence (Full Content Caching)
-- **Goal**: Cache the Markdown content of fetched URLs in SQLite to avoid redundant scraping.
-- **Task**: Modify `fetch_content` to check the database before launching Playwright.
+## Phase 3: Validation & Refinement ✅ COMPLETED
+- Testing: 19 unit tests (vitest)
+- Performance: Browser context pooling implemented
 
-### 2.2 Semantic Re-ranking
-- **Goal**: Use local embedding models to re-sort search results based on semantic relevance to the query.
-- **Task**: Implement a re-ranking function using `Transformers.js` to compare query vectors with search result snippet vectors.
-
-### 2.3 Search Engine Fallback
-- **Goal**: Ensure reliability by supporting multiple search providers.
-- **Task**: Add support for Google Web (`udm=14`) and DuckDuckGo Lite as fallback options if the primary provider (Brave) fails.
-
-## Phase 3: Validation & Refinement
-- **Testing**: End-to-end testing of the cache hit/miss scenarios.
-- **Performance**: Optimize browser launch times and database query efficiency.
-
-## Phase 4: Production Readiness & Advanced AI (Next)
-
-### 4.1 Performance: Browser Context Pooling
-- **Goal**: Eliminate browser startup latency on every search.
-- **Task**: Implement a singleton Playwright browser instance that stays alive. Incoming requests will use `browser.newContext()` and close only the context, keeping the main process warm.
-
-### 4.2 Scalability: `sqlite-vec` Integration
-- **Goal**: Move from JS-based brute-force vector search to native C-level vector indexing for scalability (>10k records).
-- **Task**: Integrate `sqlite-vec` to create virtual tables for semantic cache. Implement a fallback to JSON-based brute-force if native compilation fails on the host system.
-
-### 4.3 Intelligence: Search Intent Classification
-- **Goal**: Understand what the user is looking for before executing the search.
-- **Task**: Use `Transformers.js` (Zero-shot classification) to categorize the query (e.g., News, Technical, General) to dynamically adjust Cache TTL and processing strategy.
-
-### 4.4 Intelligence: Local Cross-lingual Support
-- **Goal**: Improve results for technical queries that might lack local language resources.
-- **Task**: Implement local language detection. If a technical query is detected in a non-English language, perform an auxiliary background search using English terms and merge the results via Semantic Re-ranking.
+## Phase 4: Production Readiness & Advanced AI ✅ COMPLETED
+- 4.1 Browser Context Pooling — Done
+- 4.2 sqlite-vec Integration — Done (with JS fallback)
+- 4.3 Search Intent Classification — Done
+- 4.4 Cross-lingual Search — Done (lang detect + on-demand translation + parallel search)
+- 4.5 Rate Limiting — Done (Token bucket, env-configurable)
+- 4.6 Encoding Detection — Done (meta charset-based)
+- 4.7 SSRF Protection — Done
