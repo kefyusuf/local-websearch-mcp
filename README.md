@@ -15,10 +15,31 @@ Bu proje, dış API bağımlılığı olmadan çalışan, yüksek performanslı 
 
 ## Kurulum
 
+Gereksinim: Node.js >= 18
+
 ```bash
 npm install
 npx playwright install chromium
 npm run build
+```
+
+> Ilk calistirmada Transformers.js modelleri otomatik indirilir (~500 MB, sadece bir kere). Indirme sirasinda sunucu yanit vermez, sonraki baslatmalar anlik olur.
+
+## MCP Client Yapilandirmasi (ornek)
+
+```json
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "node",
+      "args": ["E:/projects/my-websearch-mcp/build/index.js"],
+      "env": {
+        "RATE_LIMIT_SEARCH_PER_MIN": "10",
+        "RATE_LIMIT_FETCH_PER_MIN": "20"
+      }
+    }
+  }
+}
 ```
 
 ## Araçlar

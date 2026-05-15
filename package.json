@@ -1,8 +1,15 @@
 {
   "name": "my-websearch-mcp",
   "version": "1.0.0",
-  "description": "MCP Web Search Server",
+  "description": "Offline-first MCP server for web search and content fetching — no API keys required. Uses local AI models for intent classification, cross-lingual search, and semantic re-ranking.",
   "type": "module",
+  "keywords": ["mcp", "web-search", "semantic-search", "cross-lingual", "sqlite-vec", "playwright", "transformers.js", "model-context-protocol", "web-scraping", "markdown"],
+  "author": "",
+  "license": "ISC",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node build/index.js",
@@ -11,9 +18,6 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
     "@mozilla/readability": "^0.6.0",
