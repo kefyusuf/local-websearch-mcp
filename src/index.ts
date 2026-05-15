@@ -204,7 +204,7 @@ class WebSearchServer {
     });
   }
 
-  private async handleWebSearch(query: string) {
+  private async performSearch(query: string): Promise<any[]> {
     const browser = await this.getBrowser();
     const context = await browser.newContext({
       userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -229,15 +229,15 @@ class WebSearchServer {
               snippet: snippetEl?.textContent?.trim() || "",
               source: "brave"
             };
-          }).filter(r => r.title && r.url);
+          }).filter((r: any) => r.title && r.url);
         });
 
-        if (results.length > 0) return { content: [{ type: "text", text: JSON.stringify(results) }] };
+        if (results.length > 0) return results;
       } catch (e) {
         console.error("Brave Search failed, trying fallback...");
       }
 
-      // Fallback: Google Web-only
+      // Fallback 1: Google Web-only
       try {
         const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
         await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
@@ -252,18 +252,46 @@ class WebSearchServer {
               snippet: snippetEl?.textContent?.trim() || "",
               source: "google"
             };
-          }).filter(r => r.title && r.url);
+          }).filter((r: any) => r.title && r.url);
         });
 
-        if (results.length > 0) return { content: [{ type: "text", text: JSON.stringify(results) }] };
+        if (results.length > 0) return results;
       } catch (e) {
-        console.error("Google fallback failed.");
+        console.error("Google fallback failed, trying DuckDuckGo...");
       }
 
-      throw new Error("All search providers failed.");
+      // Fallback 2: DuckDuckGo Lite
+      try {
+        const ddgUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+        await page.goto(ddgUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const results = await page.$$eval("a.result-link", (links) => {
+          return links.slice(0, 10).map((link) => {
+            const row = link.closest("tr");
+            const snippetEl = row?.querySelector("td.result-snippet");
+            return {
+              title: link.textContent?.trim() || "",
+              url: (link as HTMLAnchorElement).href || "",
+              snippet: snippetEl?.textContent?.trim() || "",
+              source: "duckduckgo"
+            };
+          }).filter((r: any) => r.title && r.url);
+        });
+
+        if (results.length > 0) return results;
+      } catch (e) {
+        console.error("DuckDuckGo fallback failed.");
+      }
+
+      return [];
     } finally {
       await context.close();
     }
+  }
+
+  private async handleWebSearch(query: string) {
+    const results = await this.performSearch(query);
+    if (results.length === 0) throw new Error("All search providers failed.");
+    return { content: [{ type: "text", text: JSON.stringify(results) }] };
   }
 
   private async handleFetchContent(url: string) {
