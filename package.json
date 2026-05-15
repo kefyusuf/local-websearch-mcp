@@ -6,7 +6,10 @@
   "scripts": {
     "build": "tsc",
     "start": "node build/index.js",
-    "dev": "node --loader ts-node/esm src/index.ts"
+    "dev": "node --loader ts-node/esm src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage"
   },
   "keywords": [],
   "author": "",
@@ -29,6 +32,7 @@
     "@types/node": "^20.11.24",
     "@types/turndown": "^5.0.4",
     "ts-node": "^10.9.2",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^4.1.6"
   }
 }
