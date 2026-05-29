@@ -10,6 +10,8 @@ import iconv from "iconv-lite";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
+import { CrossLingualEngine } from "./cache/crosslingual.js";
+import { createSearchRateLimiter, createFetchRateLimiter } from "./rate-limiter.js";
 // --- Types & Schemas ---
 const SearchSchema = z.object({
     query: z.string().min(1).describe("The search query to perform"),
@@ -24,6 +26,9 @@ class WebSearchServer {
     browser = null;
     turndown;
     cache;
+    crossLingual;
+    searchLimiter;
+    fetchLimiter;
     constructor() {
         this.server = new Server({
             name: "my-websearch-mcp",
@@ -42,6 +47,9 @@ class WebSearchServer {
         const embeddingProvider = new TransformersEmbeddingProvider();
         const vectorStore = new SQLiteVectorStore("websearch_cache.db");
         this.cache = new SemanticCache(embeddingProvider, vectorStore);
+        this.crossLingual = new CrossLingualEngine();
+        this.searchLimiter = createSearchRateLimiter();
+        this.fetchLimiter = createFetchRateLimiter();
         this.setupTools();
         this.setupShutdownHandlers();
     }
@@ -96,6 +104,14 @@ class WebSearchServer {
             const { name, arguments: args } = request.params;
             try {
                 if (name === "web_search") {
+                    const { allowed, retryAfterMs } = this.searchLimiter.tryConsume();
+                    if (!allowed) {
+                        const seconds = Math.ceil(retryAfterMs / 1000);
+                        return {
+                            content: [{ type: "text", text: `Rate limit exceeded: web_search allows ${process.env.RATE_LIMIT_SEARCH_PER_MIN || "10"} requests per minute. Retry in ${seconds} seconds.` }],
+                            isError: true,
+                        };
+                    }
                     const { query } = SearchSchema.parse(args);
                     // 1. Detect Intent (Technical, News, etc.)
                     const intent = await this.cache.detectIntent(query);
@@ -107,15 +123,38 @@ class WebSearchServer {
                             content: [{ type: "text", text: JSON.stringify(cachedResults, null, 2) }],
                         };
                     }
-                    // 3. Perform Search (with Fallback)
-                    // For technical queries, we use a broader search strategy
+                    // 3. Detect language for cross-lingual search
+                    const lang = await this.crossLingual.detectLanguage(query);
+                    console.error(`Detected Language: ${lang}`);
+                    // 4. Cross-lingual search for non-English technical queries
+                    if (this.crossLingual.shouldCrossSearch(intent, lang)) {
+                        const enQuery = await this.crossLingual.translateToEnglish(query, lang);
+                        console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
+                        const [mainResults, auxResults] = await Promise.all([
+                            this.performSearch(query),
+                            this.performSearch(enQuery),
+                        ]);
+                        const seen = new Set();
+                        const merged = [...mainResults, ...auxResults].filter(r => {
+                            const key = r.url.toLowerCase();
+                            if (seen.has(key))
+                                return false;
+                            seen.add(key);
+                            return true;
+                        });
+                        const rankedResults = await this.cache.reRankResults(query, merged);
+                        await this.cache.set(query, rankedResults);
+                        return {
+                            content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+                        };
+                    }
+                    // 5. Standard Search (with Fallback)
                     const results = await this.handleWebSearch(query);
-                    // 3. Semantic Re-ranking
+                    // 6. Semantic Re-ranking
                     if (results.content[0].type === "text") {
                         try {
                             const parsedResults = JSON.parse(results.content[0].text);
                             const rankedResults = await this.cache.reRankResults(query, parsedResults);
-                            // 4. Save to Cache
                             await this.cache.set(query, rankedResults);
                             return {
                                 content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
@@ -128,6 +167,14 @@ class WebSearchServer {
                     return results;
                 }
                 else if (name === "fetch_content") {
+                    const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
+                    if (!allowed) {
+                        const seconds = Math.ceil(retryAfterMs / 1000);
+                        return {
+                            content: [{ type: "text", text: `Rate limit exceeded: fetch_content allows ${process.env.RATE_LIMIT_FETCH_PER_MIN || "20"} requests per minute. Retry in ${seconds} seconds.` }],
+                            isError: true,
+                        };
+                    }
                     const { url, force_refresh } = FetchSchema.parse(args);
                     // 1. Check Content Cache
                     if (!force_refresh) {
@@ -154,7 +201,7 @@ class WebSearchServer {
             }
         });
     }
-    async handleWebSearch(query) {
+    async performSearch(query) {
         const browser = await this.getBrowser();
         const context = await browser.newContext({
             userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -177,15 +224,15 @@ class WebSearchServer {
                             snippet: snippetEl?.textContent?.trim() || "",
                             source: "brave"
                         };
-                    }).filter(r => r.title && r.url);
+                    }).filter((r) => r.title && r.url);
                 });
                 if (results.length > 0)
-                    return { content: [{ type: "text", text: JSON.stringify(results) }] };
+                    return results;
             }
             catch (e) {
                 console.error("Brave Search failed, trying fallback...");
             }
-            // Fallback: Google Web-only
+            // Fallback 1: Google Web-only
             try {
                 const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
                 await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
@@ -200,19 +247,47 @@ class WebSearchServer {
                             snippet: snippetEl?.textContent?.trim() || "",
                             source: "google"
                         };
-                    }).filter(r => r.title && r.url);
+                    }).filter((r) => r.title && r.url);
                 });
                 if (results.length > 0)
-                    return { content: [{ type: "text", text: JSON.stringify(results) }] };
+                    return results;
             }
             catch (e) {
-                console.error("Google fallback failed.");
+                console.error("Google fallback failed, trying DuckDuckGo...");
             }
-            throw new Error("All search providers failed.");
+            // Fallback 2: DuckDuckGo Lite
+            try {
+                const ddgUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+                await page.goto(ddgUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+                const results = await page.$$eval("a.result-link", (links) => {
+                    return links.slice(0, 10).map((link) => {
+                        const row = link.closest("tr");
+                        const snippetEl = row?.querySelector("td.result-snippet");
+                        return {
+                            title: link.textContent?.trim() || "",
+                            url: link.href || "",
+                            snippet: snippetEl?.textContent?.trim() || "",
+                            source: "duckduckgo"
+                        };
+                    }).filter((r) => r.title && r.url);
+                });
+                if (results.length > 0)
+                    return results;
+            }
+            catch (e) {
+                console.error("DuckDuckGo fallback failed.");
+            }
+            return [];
         }
         finally {
             await context.close();
         }
+    }
+    async handleWebSearch(query) {
+        const results = await this.performSearch(query);
+        if (results.length === 0)
+            throw new Error("All search providers failed.");
+        return { content: [{ type: "text", text: JSON.stringify(results) }] };
     }
     async handleFetchContent(url) {
         // SSRF Protection: Block local/private resources
