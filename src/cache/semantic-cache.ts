@@ -31,6 +31,10 @@ export class SemanticCache {
     return await this.intentClassifier.classify(query);
   }
 
+  close(): void {
+    this.vectorStore.close();
+  }
+
   // --- Semantic Search Cache ---
 
   async get(query: string): Promise<any | null> {

@@ -26,6 +26,10 @@ export class InMemoryVectorStore implements IVectorStore {
     this.contentStore.clear();
   }
 
+  close(): void {
+    // No-op for in-memory store
+  }
+
   async getContent(url: string): Promise<any | null> {
     const entry = this.contentStore.get(url);
     if (!entry) return null;

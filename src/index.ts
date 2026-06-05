@@ -86,11 +86,12 @@ class WebSearchServer {
         await this.browser.close();
         this.browser = null;
       }
-      process.exit(0);
+      this.cache.close();
     };
 
     process.on("SIGINT", shutdown);
     process.on("SIGTERM", shutdown);
+    process.on("SIGHUP", shutdown);
   }
 
   private setupTools() {
