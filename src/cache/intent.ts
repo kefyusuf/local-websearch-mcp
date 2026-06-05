@@ -32,7 +32,7 @@ export class SearchIntentClassifier {
     const candidateLabels = ["technical", "news", "general info"];
     
     try {
-      const output = await classifier(query, candidateLabels);
+      const output = await classifier(query, candidateLabels) as { labels: string[], scores: number[] };
       const topLabel = output.labels[0];
       
       if (topLabel === "technical") return "technical";

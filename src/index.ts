@@ -226,9 +226,9 @@ class WebSearchServer {
         } else {
           throw new Error(`Unknown tool: ${name}`);
         }
-      } catch (error: any) {
+      } catch (error: unknown) {
         return {
-          content: [{ type: "text", text: `Error: ${error.message}` }],
+          content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
           isError: true,
         };
       }

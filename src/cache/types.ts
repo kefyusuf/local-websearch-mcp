@@ -1,3 +1,26 @@
+export interface TranslationResult {
+  translation_text: string;
+}
+
+export interface ClassificationResult {
+  label: string;
+  score: number;
+}
+
+export interface SearchResultItem {
+  title: string;
+  url: string;
+  snippet: string;
+  source: string;
+  semanticScore?: number;
+}
+
+export interface CacheMetadata {
+  query: string;
+  results: SearchResultItem[];
+  timestamp: number;
+}
+
 export interface IEmbeddingProvider {
   getEmbedding(text: string): Promise<number[]>;
 }
@@ -5,11 +28,11 @@ export interface IEmbeddingProvider {
 export interface VectorMatch {
   id: string;
   score: number;
-  metadata: any;
+  metadata: CacheMetadata;
 }
 
 export interface IVectorStore {
-  add(id: string, vector: number[], metadata: any): Promise<void>;
+  add(id: string, vector: number[], metadata: CacheMetadata): Promise<void>;
   search(vector: number[], limit: number): Promise<VectorMatch[]>;
   clear(): Promise<void>;
   close(): void;
@@ -28,6 +51,6 @@ export interface ContentEntry {
 
 export interface CacheEntry {
   query: string;
-  results: any;
+  results: SearchResultItem[];
   timestamp: number;
 }

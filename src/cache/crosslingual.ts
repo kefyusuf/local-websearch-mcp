@@ -1,4 +1,5 @@
 import { pipeline } from "@xenova/transformers";
+import { TranslationResult, ClassificationResult } from "./types.js";
 
 const OPUS_MT_REGISTRY: Record<string, string> = {
   "tur_Latn": "Xenova/opus-mt-tr-en",
@@ -28,7 +29,7 @@ class TranslationProvider {
         return text;
       }
     }
-    const [result] = await model(text);
+    const [result] = await model(text) as TranslationResult[];
     return result.translation_text;
   }
 }
@@ -62,7 +63,7 @@ export class CrossLingualEngine {
     try {
       const detector = await this.getLangDetector();
       if (!detector) return "eng_Latn";
-      const [result] = await detector(text);
+      const [result] = await detector(text) as ClassificationResult[];
       return result.label;
     } catch (error) {
       console.error("Language detection error:", error);

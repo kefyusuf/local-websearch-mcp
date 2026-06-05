@@ -1,6 +1,6 @@
 import Database from "better-sqlite3";
 import * as sqlite_vec from "sqlite-vec";
-import { IVectorStore, VectorMatch } from "./types.js";
+import { IVectorStore, VectorMatch, CacheMetadata, ContentEntry } from "./types.js";
 
 export class SQLiteVectorStore implements IVectorStore {
   private db: Database.Database;
@@ -61,7 +61,7 @@ export class SQLiteVectorStore implements IVectorStore {
     }
   }
 
-  async add(id: string, vector: number[], metadata: any): Promise<void> {
+  async add(id: string, vector: number[], metadata: CacheMetadata): Promise<void> {
     if (this.isVecEnabled) {
       const vecStmt = this.db.prepare("INSERT OR REPLACE INTO semantic_cache_vec(id, embedding) VALUES (?, ?)");
       const metaStmt = this.db.prepare("INSERT OR REPLACE INTO semantic_cache_metadata(id, metadata, timestamp) VALUES (?, ?, ?)");
@@ -128,8 +128,8 @@ export class SQLiteVectorStore implements IVectorStore {
     }
   }
 
-  async getContent(url: string): Promise<any | null> {
-    const row = this.db.prepare("SELECT * FROM content_cache WHERE url = ?").get(url) as any;
+  async getContent(url: string): Promise<ContentEntry | null> {
+    const row = this.db.prepare("SELECT * FROM content_cache WHERE url = ?").get(url) as ContentEntry | undefined;
     return row || null;
   }
 

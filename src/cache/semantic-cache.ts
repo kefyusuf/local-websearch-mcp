@@ -1,4 +1,4 @@
-import { IEmbeddingProvider, IVectorStore } from "./types.js";
+import { IEmbeddingProvider, IVectorStore, SearchResultItem, CacheMetadata } from "./types.js";
 import { SearchIntentClassifier, SearchIntent } from "./intent.js";
 
 const TTL_MAP: Record<string, number> = {
@@ -37,7 +37,7 @@ export class SemanticCache {
 
   // --- Semantic Search Cache ---
 
-  async get(query: string): Promise<any | null> {
+  async get(query: string): Promise<SearchResultItem[] | null> {
     try {
       const vector = await this.embeddingProvider.getEmbedding(query);
       const matches = await this.vectorStore.search(vector, 1);
@@ -52,15 +52,16 @@ export class SemanticCache {
     return null;
   }
 
-  async set(query: string, results: any): Promise<void> {
+  async set(query: string, results: SearchResultItem[]): Promise<void> {
     try {
       const vector = await this.embeddingProvider.getEmbedding(query);
       const id = Buffer.from(query).toString("base64");
-      await this.vectorStore.add(id, vector, {
+      const metadata: CacheMetadata = {
         query,
         results,
         timestamp: Date.now(),
-      });
+      };
+      await this.vectorStore.add(id, vector, metadata);
     } catch (error) {
       console.error("Cache set error:", error);
     }
@@ -102,7 +103,7 @@ export class SemanticCache {
 
   // --- Semantic Re-ranking ---
 
-  async reRankResults(query: string, results: any[]): Promise<any[]> {
+  async reRankResults(query: string, results: SearchResultItem[]): Promise<SearchResultItem[]> {
     if (results.length === 0) return results;
 
     try {

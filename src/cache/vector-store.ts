@@ -1,10 +1,10 @@
-import { IVectorStore, VectorMatch } from "./types.js";
+import { IVectorStore, VectorMatch, CacheMetadata, ContentEntry } from "./types.js";
 
 export class InMemoryVectorStore implements IVectorStore {
-  private store: Map<string, { vector: number[]; metadata: any }> = new Map();
+  private store: Map<string, { vector: number[]; metadata: CacheMetadata }> = new Map();
   private contentStore: Map<string, { content: string; category: string; timestamp: number }> = new Map();
 
-  async add(id: string, vector: number[], metadata: any): Promise<void> {
+  async add(id: string, vector: number[], metadata: CacheMetadata): Promise<void> {
     this.store.set(id, { vector, metadata });
   }
 
@@ -30,7 +30,7 @@ export class InMemoryVectorStore implements IVectorStore {
     // No-op for in-memory store
   }
 
-  async getContent(url: string): Promise<any | null> {
+  async getContent(url: string): Promise<ContentEntry | null> {
     const entry = this.contentStore.get(url);
     if (!entry) return null;
     return { url, ...entry };
