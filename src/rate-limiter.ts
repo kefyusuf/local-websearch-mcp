@@ -39,18 +39,25 @@ export class TokenBucket {
   }
 }
 
-export function createSearchRateLimiter(): TokenBucket {
-  const perMinute = parseInt(process.env.RATE_LIMIT_SEARCH_PER_MIN || "10", 10);
+function parseRateLimit(raw: string | undefined, defaultValue: number): TokenBucket {
+  const perMinute = raw ? parseInt(raw, 10) : defaultValue;
+  if (isNaN(perMinute) || perMinute <= 0) {
+    // Treat unparseable/zero as "effectively unlimited"
+    return new TokenBucket({
+      maxTokens: Number.MAX_SAFE_INTEGER,
+      refillRatePerSecond: Number.MAX_SAFE_INTEGER,
+    });
+  }
   return new TokenBucket({
     maxTokens: Math.min(perMinute, 5),
     refillRatePerSecond: perMinute / 60,
   });
 }
 
+export function createSearchRateLimiter(): TokenBucket {
+  return parseRateLimit(process.env.RATE_LIMIT_SEARCH_PER_MIN, 10);
+}
+
 export function createFetchRateLimiter(): TokenBucket {
-  const perMinute = parseInt(process.env.RATE_LIMIT_FETCH_PER_MIN || "20", 10);
-  return new TokenBucket({
-    maxTokens: Math.min(perMinute, 5),
-    refillRatePerSecond: perMinute / 60,
-  });
+  return parseRateLimit(process.env.RATE_LIMIT_FETCH_PER_MIN, 20);
 }
