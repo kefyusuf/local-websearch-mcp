@@ -315,7 +315,11 @@ class WebSearchServer {
 
       return [];
     } finally {
-      await context.close();
+      try {
+        await context.close();
+      } catch (e) {
+        console.error("Error closing browser context:", e);
+      }
     }
   }
 
@@ -436,7 +440,11 @@ class WebSearchServer {
         content: [{ type: "text", text: fullText }],
       };
     } finally {
-      await context.close();
+      try {
+        await context.close();
+      } catch (e) {
+        console.error("Error closing browser context:", e);
+      }
     }
   }
 
