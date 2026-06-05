@@ -10,6 +10,8 @@ import { JSDOM } from "jsdom";
 import TurndownService from "turndown";
 import { z } from "zod";
 import iconv from "iconv-lite";
+import { promises as dns } from "dns";
+import { isIP } from "net";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
@@ -322,13 +324,74 @@ class WebSearchServer {
     return { content: [{ type: "text", text: JSON.stringify(results) }] };
   }
 
+  private isPrivateIP(ip: string): boolean {
+    // IPv4-mapped IPv6 like ::ffff:127.0.0.1
+    let addr = ip;
+    if (addr.startsWith("::ffff:")) {
+      addr = addr.substring(7);
+    }
+
+    if (isIP(addr) !== 4) {
+      // IPv6 private ranges
+      // RFC 4193 (Unique Local Address) — fc00::/7
+      if (addr.startsWith("fc") || addr.startsWith("fd")) return true;
+      // Loopback — ::1
+      if (addr === "::1" || addr === "0:0:0:0:0:0:0:1") return true;
+      // Link-local — fe80::/10
+      if (addr.startsWith("fe80")) return true;
+      return false;
+    }
+
+    const parts = addr.split(".").map(Number);
+    // 127.0.0.0/8 (loopback)
+    if (parts[0] === 127) return true;
+    // 10.0.0.0/8 (RFC 1918)
+    if (parts[0] === 10) return true;
+    // 172.16.0.0/12 (RFC 1918)
+    if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
+    // 192.168.0.0/16 (RFC 1918)
+    if (parts[0] === 192 && parts[1] === 168) return true;
+    // 169.254.0.0/16 (link-local, cloud metadata endpoint)
+    if (parts[0] === 169 && parts[1] === 254) return true;
+    // 100.64.0.0/10 (CGNAT)
+    if (parts[0] === 100 && parts[1] >= 64 && parts[1] <= 127) return true;
+    // 0.0.0.0/8 (current network)
+    if (parts[0] === 0) return true;
+
+    return false;
+  }
+
+  private async isPrivateHost(hostname: string): Promise<boolean> {
+    const lower = hostname.toLowerCase();
+
+    // Quick string check for well-known local addresses
+    if (lower === "localhost" || lower === "localhost6" || lower === "0.0.0.0") {
+      return true;
+    }
+
+    // Check if it's already an IP and test against private ranges
+    if (isIP(lower)) {
+      return this.isPrivateIP(lower);
+    }
+
+    // Resolve DNS to catch DNS rebinding attacks
+    const addresses = await dns.resolve4(hostname).catch(() => []);
+    const addresses6 = await dns.resolve6(hostname).catch(() => []);
+    const allAddresses = [...addresses, ...addresses6];
+
+    for (const ip of allAddresses) {
+      if (this.isPrivateIP(ip)) return true;
+    }
+
+    return false;
+  }
+
   private async handleFetchContent(url: string) {
-    // SSRF Protection: Block local/private resources
+    // SSRF Protection: Block local/private resources via DNS resolution
     const parsedUrl = new URL(url);
-    const hostname = parsedUrl.hostname.toLowerCase();
-    const privateIpRegex = /^(localhost|127\.|10\.|172\.(1[6-9]|2[0-9]|3[0-1])\.|192\.168\.)/;
-    
-    if (privateIpRegex.test(hostname)) {
+    const hostname = parsedUrl.hostname;
+
+    if (await this.isPrivateHost(hostname)) {
       throw new Error(`Access to local/private resource is blocked for security reasons: ${hostname}`);
     }
 
