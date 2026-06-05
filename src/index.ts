@@ -272,6 +272,14 @@ class WebSearchServer {
       try {
         const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
         await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+
+        // Detect captcha or rate-limiting pages
+        const pageTitle = await page.title();
+        if (/captcha|unusual traffic/i.test(pageTitle)) {
+          console.error("Google blocked the request — captcha or rate-limit detected");
+          throw new Error("Google captcha/rate-limit");
+        }
+
         const results = await page.$$eval("div.g", (elements) => {
           return elements.slice(0, 7).map((el) => {
             const titleEl = el.querySelector("h3");
@@ -287,14 +295,19 @@ class WebSearchServer {
         });
 
         if (results.length > 0) return results;
+        console.error("Google returned zero results — likely DOM structure change (selector div.g may be outdated)");
       } catch (e) {
-        console.error("Google fallback failed, trying DuckDuckGo...");
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("Google fallback failed (" + msg + "), trying DuckDuckGo...");
       }
 
       // Fallback 2: DuckDuckGo Lite
       try {
         const ddgUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-        await page.goto(ddgUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const response = await page.goto(ddgUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
+        if (response && response.status() >= 400) {
+          console.error(`DuckDuckGo returned status ${response.status()}`);
+        }
         const results = await page.$$eval("a.result-link", (links) => {
           return links.slice(0, 10).map((link) => {
             const row = link.closest("tr");
@@ -309,8 +322,10 @@ class WebSearchServer {
         });
 
         if (results.length > 0) return results;
+        console.error("DuckDuckGo returned zero results — endpoint may have changed");
       } catch (e) {
-        console.error("DuckDuckGo fallback failed.");
+        const msg = e instanceof Error ? e.message : String(e);
+        console.error("DuckDuckGo fallback failed (" + msg + ")");
       }
 
       return [];
