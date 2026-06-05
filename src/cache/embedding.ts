@@ -3,6 +3,7 @@ import { IEmbeddingProvider } from "./types.js";
 
 export class TransformersEmbeddingProvider implements IEmbeddingProvider {
   private extractor: any = null;
+  private extractorFailed = false;
   private modelName: string;
 
   constructor(modelName: string = "Xenova/paraphrase-multilingual-MiniLM-L12-v2") {
@@ -10,14 +11,23 @@ export class TransformersEmbeddingProvider implements IEmbeddingProvider {
   }
 
   private async getExtractor() {
+    if (this.extractorFailed) return null;
+
     if (!this.extractor) {
-      this.extractor = await pipeline("feature-extraction", this.modelName);
+      try {
+        this.extractor = await pipeline("feature-extraction", this.modelName);
+      } catch (e) {
+        this.extractorFailed = true;
+        console.error("Embedding model permanently failed:", e);
+        return null;
+      }
     }
     return this.extractor;
   }
 
   async getEmbedding(text: string): Promise<number[]> {
     const extractor = await this.getExtractor();
+    if (!extractor) return [];
     const output = await extractor(text, { pooling: "mean", normalize: true });
     return Array.from(output.data);
   }

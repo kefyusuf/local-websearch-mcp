@@ -4,6 +4,7 @@ export type SearchIntent = "technical" | "news" | "general";
 
 export class SearchIntentClassifier {
   private classifier: any = null;
+  private classifierFailed = false;
   private modelName: string;
 
   constructor(modelName: string = "Xenova/nli-deberta-v3-xsmall") {
@@ -11,14 +12,23 @@ export class SearchIntentClassifier {
   }
 
   private async getClassifier() {
+    if (this.classifierFailed) return null;
+
     if (!this.classifier) {
-      this.classifier = await pipeline("zero-shot-classification", this.modelName);
+      try {
+        this.classifier = await pipeline("zero-shot-classification", this.modelName);
+      } catch (e) {
+        this.classifierFailed = true;
+        console.error("Intent classification model permanently failed:", e);
+        return null;
+      }
     }
     return this.classifier;
   }
 
   async classify(query: string): Promise<SearchIntent> {
     const classifier = await this.getClassifier();
+    if (!classifier) return "general";
     const candidateLabels = ["technical", "news", "general info"];
     
     try {

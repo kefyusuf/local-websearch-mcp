@@ -8,16 +8,25 @@ const LANG_DETECT_MODEL = "onnx-community/language_detection-ONNX";
 
 class TranslationProvider {
   private models = new Map<string, any>();
+  private loadFailed = false;
 
   async translate(text: string, sourceLang: string): Promise<string> {
     const modelName = OPUS_MT_REGISTRY[sourceLang];
     if (!modelName) return text;
 
+    if (this.loadFailed) return text;
+
     let model = this.models.get(modelName);
     if (!model) {
-      model = await pipeline("translation", modelName);
-      this.models.set(modelName, model);
-      console.error(`Translation model loaded: ${modelName}`);
+      try {
+        model = await pipeline("translation", modelName);
+        this.models.set(modelName, model);
+        console.error(`Translation model loaded: ${modelName}`);
+      } catch (e) {
+        this.loadFailed = true;
+        console.error("Translation model permanently failed:", e);
+        return text;
+      }
     }
     const [result] = await model(text);
     return result.translation_text;
@@ -26,6 +35,7 @@ class TranslationProvider {
 
 export class CrossLingualEngine {
   private langDetector: any = null;
+  private langDetectFailed = false;
   private translator: TranslationProvider;
 
   constructor() {
@@ -33,9 +43,17 @@ export class CrossLingualEngine {
   }
 
   private async getLangDetector() {
+    if (this.langDetectFailed) return null;
+
     if (!this.langDetector) {
-      this.langDetector = await pipeline("text-classification", LANG_DETECT_MODEL);
-      console.error("Language detection model loaded.");
+      try {
+        this.langDetector = await pipeline("text-classification", LANG_DETECT_MODEL);
+        console.error("Language detection model loaded.");
+      } catch (e) {
+        this.langDetectFailed = true;
+        console.error("Language detection model permanently failed:", e);
+        return null;
+      }
     }
     return this.langDetector;
   }
@@ -43,6 +61,7 @@ export class CrossLingualEngine {
   async detectLanguage(text: string): Promise<string> {
     try {
       const detector = await this.getLangDetector();
+      if (!detector) return "eng_Latn";
       const [result] = await detector(text);
       return result.label;
     } catch (error) {
