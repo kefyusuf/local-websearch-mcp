@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { SemanticCache } from "../cache/semantic-cache.js";
-import { InMemoryVectorStore } from "../cache/vector-store.js";
+import { InMemoryVectorStore } from "./helpers.js";
 import type { IEmbeddingProvider } from "../cache/types.js";
 
 function createMockEmbedding(vectors: Record<string, number[]>): IEmbeddingProvider {

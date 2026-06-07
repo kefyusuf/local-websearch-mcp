@@ -1,5 +1,6 @@
 import { IEmbeddingProvider, IVectorStore, SearchResultItem, CacheMetadata } from "./types.js";
 import { SearchIntentClassifier, SearchIntent } from "./intent.js";
+import { cosineSimilarity } from "./utils.js";
 
 const TTL_MAP: Record<string, number> = {
   news: 1 * 24 * 60 * 60 * 1000,    // 1 Day
@@ -55,7 +56,8 @@ export class SemanticCache {
   async set(query: string, results: SearchResultItem[]): Promise<void> {
     try {
       const vector = await this.embeddingProvider.getEmbedding(query);
-      const id = Buffer.from(query).toString("base64");
+      const normalized = query.trim().toLowerCase();
+      const id = Buffer.from(normalized).toString("base64");
       const metadata: CacheMetadata = {
         query,
         results,
@@ -112,7 +114,7 @@ export class SemanticCache {
         results.map(async (res) => {
           const text = `${res.title} ${res.snippet}`;
           const resVector = await this.embeddingProvider.getEmbedding(text);
-          const score = this.cosineSimilarity(queryVector, resVector);
+          const score = cosineSimilarity(queryVector, resVector);
           return { ...res, semanticScore: score };
         })
       );
@@ -124,16 +126,4 @@ export class SemanticCache {
     }
   }
 
-  private cosineSimilarity(vecA: number[], vecB: number[]): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-      dotProduct += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
-    }
-    if (normA === 0 || normB === 0) return 0;
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
-  }
 }

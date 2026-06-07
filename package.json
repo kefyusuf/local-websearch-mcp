@@ -12,11 +12,14 @@
   },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "start": "node build/index.js",
     "dev": "node --loader ts-node/esm src/index.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "docker:build": "docker compose build",
+    "docker:up": "docker compose up"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",

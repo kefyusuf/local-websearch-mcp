@@ -1,6 +1,7 @@
 import Database from "better-sqlite3";
 import * as sqlite_vec from "sqlite-vec";
 import { IVectorStore, VectorMatch, CacheMetadata, ContentEntry } from "./types.js";
+import { cosineSimilarity } from "./utils.js";
 
 export class SQLiteVectorStore implements IVectorStore {
   private db: Database.Database;
@@ -104,7 +105,7 @@ export class SQLiteVectorStore implements IVectorStore {
       
       const results: VectorMatch[] = rows.map((row) => {
         const storedVector = JSON.parse(row.vector) as number[];
-        const score = this.cosineSimilarity(vector, storedVector);
+        const score = cosineSimilarity(vector, storedVector);
         return {
           id: row.id,
           score,
@@ -138,19 +139,6 @@ export class SQLiteVectorStore implements IVectorStore {
       "INSERT OR REPLACE INTO content_cache (url, content, category, timestamp) VALUES (?, ?, ?, ?)"
     );
     stmt.run(url, content, category, Date.now());
-  }
-
-  private cosineSimilarity(vecA: number[], vecB: number[]): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-      dotProduct += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
-    }
-    if (normA === 0 || normB === 0) return 0;
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 
   close() {

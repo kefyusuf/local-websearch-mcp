@@ -53,10 +53,19 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
 | `web_search` | Searches the web with intent classification, cross-lingual support, semantic re-ranking, and multi-engine fallback. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with smart TTL caching and charset detection. |
 
+## Docker
+
+```bash
+npm run docker:build  # Build Docker image
+npm run docker:up     # Start with docker compose
+```
+
+Docker Compose mounts persistent volumes for the SQLite cache database and HuggingFace model cache.
+
 ## Testing
 
 ```bash
-npm test              # Single run
+npm test              # Single run (vitest)
 npm run test:watch    # Watch mode
 npm run test:coverage # Coverage report
 ```

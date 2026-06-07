@@ -3,6 +3,15 @@ import { TranslationResult, ClassificationResult } from "./types.js";
 
 const OPUS_MT_REGISTRY: Record<string, string> = {
   "tur_Latn": "Xenova/opus-mt-tr-en",
+  "fra_Latn": "Xenova/opus-mt-fr-en",
+  "deu_Latn": "Xenova/opus-mt-de-en",
+  "spa_Latn": "Xenova/opus-mt-es-en",
+  "por_Latn": "Xenova/opus-mt-pt-en",
+  "ita_Latn": "Xenova/opus-mt-it-en",
+  "nld_Latn": "Xenova/opus-mt-nl-en",
+  "rus_Cyrl": "Xenova/opus-mt-ru-en",
+  "zho_Hans": "Xenova/opus-mt-zh-en",
+  "jpn_Jpan": "Xenova/opus-mt-ja-en",
 };
 
 const LANG_DETECT_MODEL = "onnx-community/language_detection-ONNX";

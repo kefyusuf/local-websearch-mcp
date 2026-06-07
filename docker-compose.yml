@@ -1,0 +1,19 @@
+version: "3.9"
+
+services:
+  websearch-mcp:
+    build: .
+    image: my-websearch-mcp:latest
+    container_name: websearch-mcp
+    stdin_open: true
+    tty: true
+    environment:
+      - RATE_LIMIT_SEARCH_PER_MIN=10
+      - RATE_LIMIT_FETCH_PER_MIN=20
+    volumes:
+      - websearch-cache:/app/websearch_cache.db
+      - websearch-models:/root/.cache/huggingface
+
+volumes:
+  websearch-cache:
+  websearch-models:

@@ -1,4 +1,5 @@
-import { IVectorStore, VectorMatch, CacheMetadata, ContentEntry } from "./types.js";
+import { IVectorStore, VectorMatch, CacheMetadata, ContentEntry } from "../cache/types.js";
+import { cosineSimilarity } from "../cache/utils.js";
 
 export class InMemoryVectorStore implements IVectorStore {
   private store: Map<string, { vector: number[]; metadata: CacheMetadata }> = new Map();
@@ -12,7 +13,7 @@ export class InMemoryVectorStore implements IVectorStore {
     const results: VectorMatch[] = [];
 
     for (const [id, entry] of this.store.entries()) {
-      const score = this.cosineSimilarity(vector, entry.vector);
+      const score = cosineSimilarity(vector, entry.vector);
       results.push({ id, score, metadata: entry.metadata });
     }
 
@@ -27,7 +28,6 @@ export class InMemoryVectorStore implements IVectorStore {
   }
 
   close(): void {
-    // No-op for in-memory store
   }
 
   async getContent(url: string): Promise<ContentEntry | null> {
@@ -38,17 +38,5 @@ export class InMemoryVectorStore implements IVectorStore {
 
   async setContent(url: string, content: string, category: string): Promise<void> {
     this.contentStore.set(url, { content, category, timestamp: Date.now() });
-  }
-
-  private cosineSimilarity(vecA: number[], vecB: number[]): number {
-    let dotProduct = 0;
-    let normA = 0;
-    let normB = 0;
-    for (let i = 0; i < vecA.length; i++) {
-      dotProduct += vecA[i] * vecB[i];
-      normA += vecA[i] * vecA[i];
-      normB += vecB[i] * vecB[i];
-    }
-    return dotProduct / (Math.sqrt(normA) * Math.sqrt(normB));
   }
 }
