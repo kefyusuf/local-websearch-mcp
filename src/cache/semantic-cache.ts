@@ -38,7 +38,6 @@ export class SemanticCache {
   }
 
   private async getQueryVector(query: string): Promise<number[] | null> {
-    if (!this.embeddingProvider.isAvailable()) return null;
     const vector = await this.embeddingProvider.getEmbedding(query);
     if (vector.length === 0) return null;
     return vector;
@@ -142,10 +141,11 @@ export class SemanticCache {
         })
       );
 
-      return rankedResults.sort((a, b) => b.semanticScore - a.semanticScore);
+      const sorted = rankedResults.sort((a, b) => b.semanticScore - a.semanticScore);
+      return sorted.slice(0, 5);
     } catch (error) {
       console.error("Re-ranking error:", error);
-      return results;
+      return results.slice(0, 5);
     }
   }
 
