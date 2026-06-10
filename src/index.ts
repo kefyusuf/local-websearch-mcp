@@ -100,7 +100,7 @@ class WebSearchServer {
       emDelimiter: "_",
     });
 
-    this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", true);
+    this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
     this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
 
     // Initialize Semantic Cache with SQLite for persistence
@@ -108,7 +108,12 @@ class WebSearchServer {
     const vectorStore = new SQLiteVectorStore(getEnv("CACHE_DB_PATH", "websearch_cache.db"));
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
 
-    this.crossLingual = new CrossLingualEngine();
+    // Clear any stale cached results from previous runs
+    this.cache.clearSearchCache().catch(() => {});
+
+    if (this.enableCrosslingual) {
+      this.crossLingual = new CrossLingualEngine();
+    }
 
     this.searchLimiter = createSearchRateLimiter();
     this.fetchLimiter = createFetchRateLimiter();
@@ -334,58 +339,11 @@ class WebSearchServer {
     }
 
     const { query } = SearchSchema.parse(args);
-    let detectedLang: string | null = null;
-    let intent: SearchIntent | null = null;
+    const queryLocale = resolveSearchLocale(query, this.crossLingual
+      ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
+      : "eng_Latn");
 
-    if (this.crossLingual) {
-      detectedLang = await this.crossLingual.detectLanguage(query);
-      console.error(`Detected Language: ${detectedLang}`);
-
-      if (this.enableCrosslingual) {
-        intent = await this.cache.detectIntent(query);
-        console.error(`Detected Intent: ${intent}`);
-      }
-    }
-
-    const queryLocale = resolveSearchLocale(query, detectedLang);
-
-    // 1. Check Semantic Search Cache
-    const cachedResults = await this.cache.get(query);
-    if (cachedResults) {
-      return {
-        content: [{ type: "text", text: formatSearchResults(query, cachedResults) }],
-      };
-    }
-
-    // 2. Optional Cross-lingual search
-    if (this.enableCrosslingual && this.crossLingual && intent && detectedLang) {
-      if (this.crossLingual.shouldCrossSearch(intent, detectedLang)) {
-        const enQuery = await this.crossLingual.translateToEnglish(query, detectedLang);
-        console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
-
-        const englishLocale = resolveSearchLocale(enQuery, "eng_Latn");
-        const [mainResults, auxResults] = await Promise.all([
-          this.executeProviderSearch(query, queryLocale),
-          this.executeProviderSearch(enQuery, englishLocale),
-        ]);
-
-        const seen = new Set<string>();
-        const merged = [...mainResults, ...auxResults].filter(r => {
-          const key = r.url.toLowerCase();
-          if (seen.has(key)) return false;
-          seen.add(key);
-          return true;
-        });
-
-        const rankedResults = await this.cache.reRankResults(query, merged);
-        await this.cache.set(query, rankedResults);
-        return {
-          content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
-        };
-      }
-    }
-
-    // 3. Standard Search with fallback across configured providers
+    // Search across configured providers
     const results = await this.executeProviderSearch(query, queryLocale);
 
     if (results.length === 0) {
@@ -396,10 +354,21 @@ class WebSearchServer {
       };
     }
 
-    // 4. Semantic Re-ranking
-    const rankedResults = await this.cache.reRankResults(query, results);
-    await this.cache.set(query, rankedResults);
+    // Fetch top 2 results and extract answer
+    const urls = results.slice(0, 2).map(r => r.url).filter(Boolean);
+    const pages = await Promise.all(urls.map(url => this.fetchPageContent(url)));
+    const validPages = pages.filter(p => p !== null) as { url: string; title: string; content: string }[];
 
+    if (validPages.length > 0) {
+      const combinedContent = validPages.map(p => `# ${p.title}\n${p.content}`).join("\n\n---\n\n");
+      const answer = extractAnswerFromContent(query, combinedContent, validPages.map(p => p.url));
+      return {
+        content: [{ type: "text", text: answer }],
+      };
+    }
+
+    // Fallback: return ranked results
+    const rankedResults = await this.cache.reRankResults(query, results);
     return {
       content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
     };
@@ -532,39 +501,7 @@ class WebSearchServer {
 
   private async handleAnswer(args: unknown) {
     const { question } = AnswerSchema.parse(args);
-
-    // 1. Search
-    const queryLocale = resolveSearchLocale(question, "eng_Latn");
-    const results = await this.executeProviderSearch(question, queryLocale);
-
-    if (results.length === 0) {
-      return {
-        content: [{ type: "text", text: `Could not find any results for "${question}".` }],
-        isError: true,
-      };
-    }
-
-    // 2. Fetch top 2 results
-    const urls = results.slice(0, 2).map(r => r.url);
-    const pages = await Promise.all(urls.map(url => this.fetchPageContent(url)));
-
-    // 3. Extract answer from fetched content
-    const validPages = pages.filter(p => p !== null) as { url: string; title: string; content: string }[];
-    if (validPages.length === 0) {
-      // Fallback: return ranked results
-      const ranked = await this.cache.reRankResults(question, results);
-      return {
-        content: [{ type: "text", text: formatSearchResults(question, ranked) }],
-      };
-    }
-
-    // Combine content for answer extraction
-    const combinedContent = validPages.map(p => `# ${p.title}\n${p.content}`).join("\n\n---\n\n");
-    const extracted = extractAnswerFromContent(question, combinedContent, validPages.map(p => p.url));
-
-    return {
-      content: [{ type: "text", text: extracted }],
-    };
+    return this.handleSearch({ query: question });
   }
 
   private async fetchPageContent(url: string): Promise<{ url: string; title: string; content: string } | null> {

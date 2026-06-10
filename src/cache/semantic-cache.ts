@@ -53,6 +53,12 @@ export class SemanticCache {
       const matches = await this.vectorStore.search(vector, 1);
 
       if (matches.length > 0 && matches[0].score >= this.threshold) {
+        // Check TTL: cached search results expire after 1 hour
+        const age = Date.now() - matches[0].metadata.timestamp;
+        if (age > 60 * 60 * 1000) {
+          console.error(`Cache expired (age: ${Math.round(age / 1000 / 60)}m)`);
+          return null;
+        }
         console.error(`Cache Hit! Similarity: ${matches[0].score.toFixed(4)}`);
         return matches[0].metadata.results;
       }
@@ -77,6 +83,15 @@ export class SemanticCache {
       await this.vectorStore.add(id, vector, metadata);
     } catch (error) {
       console.error("Cache set error:", error);
+    }
+  }
+
+  async clearSearchCache(): Promise<void> {
+    try {
+      await this.vectorStore.clear();
+      console.error("Search cache cleared.");
+    } catch (error) {
+      console.error("Clear cache error:", error);
     }
   }
 
