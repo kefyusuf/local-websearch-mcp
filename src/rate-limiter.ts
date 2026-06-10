@@ -39,10 +39,10 @@ export class TokenBucket {
   }
 }
 
-function parseRateLimit(raw: string | undefined, defaultValue: number): TokenBucket {
+function parseRateLimit(raw: string | undefined, defaultValue: number, label: string): TokenBucket {
   const perMinute = raw ? parseInt(raw, 10) : defaultValue;
   if (isNaN(perMinute) || perMinute <= 0) {
-    // Treat unparseable/zero as "effectively unlimited"
+    console.error(`WARNING: ${label} env "${raw}" is invalid. Rate limiting disabled (unlimited).`);
     return new TokenBucket({
       maxTokens: Number.MAX_SAFE_INTEGER,
       refillRatePerSecond: Number.MAX_SAFE_INTEGER,
@@ -55,9 +55,11 @@ function parseRateLimit(raw: string | undefined, defaultValue: number): TokenBuc
 }
 
 export function createSearchRateLimiter(): TokenBucket {
-  return parseRateLimit(process.env.RATE_LIMIT_SEARCH_PER_MIN, 10);
+  return parseRateLimit(process.env.RATE_LIMIT_SEARCH_PER_MIN, 10, "RATE_LIMIT_SEARCH_PER_MIN");
 }
 
 export function createFetchRateLimiter(): TokenBucket {
-  return parseRateLimit(process.env.RATE_LIMIT_FETCH_PER_MIN, 20);
+  return parseRateLimit(process.env.RATE_LIMIT_FETCH_PER_MIN, 20, "RATE_LIMIT_FETCH_PER_MIN");
 }
+
+

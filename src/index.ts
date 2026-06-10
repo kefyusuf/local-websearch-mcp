@@ -80,6 +80,8 @@ class WebSearchServer {
   private providers: SearchProvider[] = [];
   private enableCrosslingual: boolean;
   private fetchWaitUntil: "domcontentloaded" | "networkidle";
+  private pageCache = new Map<string, { url: string; title: string; content: string; timestamp: number }>();
+  private readonly PAGE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
 
   constructor() {
     this.server = new Server(
@@ -255,6 +257,7 @@ class WebSearchServer {
         try { await this.browser.close(); } catch {}
         this.browser = null;
       }
+      this.pageCache.clear();
       this.cache.close();
     };
 
@@ -505,6 +508,13 @@ class WebSearchServer {
   }
 
   private async fetchPageContent(url: string): Promise<{ url: string; title: string; content: string } | null> {
+    // Check in-memory cache first
+    const cached = this.pageCache.get(url);
+    if (cached && Date.now() - cached.timestamp < this.PAGE_CACHE_TTL) {
+      console.error(`Page cache hit: ${url}`);
+      return { url: cached.url, title: cached.title, content: cached.content };
+    }
+
     try {
       const context = await this.getBrowserContext();
       const page = await context.newPage();
@@ -529,7 +539,9 @@ class WebSearchServer {
         if (!article || !article.content) return null;
 
         const markdown = this.turndown.turndown(article.content);
-        return { url, title: article.title || "Untitled", content: markdown };
+        const result = { url, title: article.title || "Untitled", content: markdown };
+        this.pageCache.set(url, { ...result, timestamp: Date.now() });
+        return result;
       } finally {
         await page.close().catch(() => {});
       }
