@@ -17,6 +17,14 @@ import { SemanticCache } from "./cache/semantic-cache.js";
 import { CrossLingualEngine } from "./cache/crosslingual.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 import { SearchIntent } from "./cache/intent.js";
+import {
+  parseBingResults,
+  parseBraveResults,
+  parseDuckDuckGoResults,
+  parseGoogleResults,
+  resolveSearchLocale,
+  type SearchLocale,
+} from "./search-utils.js";
 
 // --- Types & Schemas ---
 
@@ -32,13 +40,9 @@ const FetchSchema = z.object({
 // --- Search Provider Types ---
 
 type SearchProvider = {
+  name: string;
   priority: number;
-  execute: (query: string) => Promise<any[]>;
-};
-
-type ProviderResult = {
-  results: any[];
-  provider: string;
+  execute: (query: string, locale: SearchLocale) => Promise<any[]>;
 };
 
 // --- Env Configuration ---
@@ -92,17 +96,15 @@ class WebSearchServer {
       emDelimiter: "_",
     });
 
-    this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
+    this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", true);
     this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
 
     // Initialize Semantic Cache with SQLite for persistence
     const embeddingProvider = new TransformersEmbeddingProvider();
-    const vectorStore = new SQLiteVectorStore("websearch_cache.db");
+    const vectorStore = new SQLiteVectorStore(getEnv("CACHE_DB_PATH", "websearch_cache.db"));
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
 
-    if (this.enableCrosslingual) {
-      this.crossLingual = new CrossLingualEngine();
-    }
+    this.crossLingual = new CrossLingualEngine();
 
     this.searchLimiter = createSearchRateLimiter();
     this.fetchLimiter = createFetchRateLimiter();
@@ -113,19 +115,19 @@ class WebSearchServer {
   }
 
   private setupProviders() {
-    const order = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing,brave,google");
+    const order = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing");
 
-    const registry: Record<string, (query: string) => Promise<any[]>> = {
-      duckduckgo: (q) => this.searchDDG(q),
-      bing: (q) => this.searchBing(q),
-      brave: (q) => this.searchBrave(q),
-      google: (q) => this.searchGoogle(q),
+    const registry: Record<string, (query: string, locale: SearchLocale) => Promise<any[]>> = {
+      duckduckgo: (q, locale) => this.searchDDG(q, locale),
+      bing: (q, locale) => this.searchBing(q, locale),
+      brave: (q, locale) => this.searchBrave(q, locale),
+      google: (q, locale) => this.searchGoogle(q, locale),
     };
 
     this.providers = [];
     for (const name of order) {
       if (registry[name]) {
-        this.providers.push({ priority: this.providers.length, execute: registry[name] });
+        this.providers.push({ name, priority: this.providers.length, execute: registry[name] });
         console.error(`Search provider registered: ${name}`);
       } else {
         console.error(`Unknown search provider in SEARCH_PROVIDERS: ${name}`);
@@ -134,18 +136,19 @@ class WebSearchServer {
 
     if (this.providers.length === 0) {
       console.error("No valid search providers configured. Defaulting to duckduckgo.");
-      this.providers.push({ priority: 0, execute: (q) => this.searchDDG(q) });
+      this.providers.push({ name: "duckduckgo", priority: 0, execute: (q, locale) => this.searchDDG(q, locale) });
     }
   }
 
   // --- DuckDuckGo Lite Search ---
 
-  private async searchDDG(query: string): Promise<any[]> {
+  private async searchDDG(query: string, locale: SearchLocale): Promise<any[]> {
     const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
     const response = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html",
+        "Accept-Language": locale.acceptLanguage,
       },
       signal: AbortSignal.timeout(10000),
     });
@@ -153,65 +156,18 @@ class WebSearchServer {
     if (!response.ok) return [];
 
     const html = await response.text();
-    const dom = new JSDOM(html);
-    const doc = dom.window.document;
-    const results: any[] = [];
-    const rows = doc.querySelectorAll("table.result tr");
-
-    // DDG Lite returns results in <table class="result"> with alternating rows
-    let currentTitle = "";
-    let currentUrl = "";
-    let currentSnippet = "";
-
-    rows.forEach((row) => {
-      const links = row.querySelectorAll("a");
-      const tds = row.querySelectorAll("td");
-
-      // Title + URL row
-      if (links.length > 0) {
-        links.forEach((link) => {
-          const href = link.getAttribute("href") || "";
-          if (href.startsWith("http")) {
-            currentUrl = href;
-          }
-        });
-        const snippetTd = row.querySelector("td.snippet, td.result-snippet");
-        if (snippetTd) {
-          currentSnippet = snippetTd.textContent?.trim() || "";
-        }
-        const titleEl = row.querySelector(".result-link a, a.result-link");
-        if (titleEl) {
-          currentTitle = titleEl.textContent?.trim() || "";
-          if (currentTitle && currentUrl) {
-            results.push({ title: currentTitle, url: currentUrl, snippet: currentSnippet, source: "duckduckgo" });
-            currentTitle = "";
-            currentUrl = "";
-            currentSnippet = "";
-          }
-        }
-      }
-
-      // Snippet-only row (alternate row in DDG Lite table)
-      if (tds.length === 1 && !currentUrl) {
-        const text = tds[0].textContent?.trim();
-        if (text && results.length > 0) {
-          results[results.length - 1].snippet = text;
-        }
-      }
-    });
-
-    return results.slice(0, 10).filter((r: any) => r.title && r.url);
+    return parseDuckDuckGoResults(html);
   }
 
   // --- Bing Search (Fallback) ---
 
-  private async searchBing(query: string): Promise<any[]> {
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=en-US`;
+  private async searchBing(query: string, locale: SearchLocale): Promise<any[]> {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=${encodeURIComponent(locale.market)}`;
     const response = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": locale.acceptLanguage,
       },
       signal: AbortSignal.timeout(15000),
     });
@@ -219,32 +175,18 @@ class WebSearchServer {
     if (!response.ok) return [];
 
     const html = await response.text();
-    const dom = new JSDOM(html);
-    const doc = dom.window.document;
-    return Array.from(doc.querySelectorAll(".b_algo")).slice(0, 10).map((el) => {
-      const h2 = el.querySelector("h2");
-      const link = h2?.querySelector("a");
-      const desc = el.querySelector(".b_caption p");
-      const cite = el.querySelector("cite");
-      const rawUrl = link?.getAttribute("href") || "";
-      const cleanUrl = citeToUrl(cite?.textContent?.trim() || "") || rawUrl;
-      return {
-        title: h2?.textContent?.trim() || "",
-        url: cleanUrl,
-        snippet: desc?.textContent?.trim() || "",
-        source: "bing",
-      };
-    }).filter((r: any) => r.title && r.url);
+    return parseBingResults(html);
   }
 
   // --- Brave Search (Fallback) ---
 
-  private async searchBrave(query: string): Promise<any[]> {
+  private async searchBrave(query: string, locale: SearchLocale): Promise<any[]> {
     const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
     const response = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": locale.acceptLanguage,
       },
       signal: AbortSignal.timeout(10000),
     });
@@ -252,28 +194,18 @@ class WebSearchServer {
     if (!response.ok) return [];
 
     const html = await response.text();
-    const dom = new JSDOM(html);
-    const doc = dom.window.document;
-    return Array.from(doc.querySelectorAll("div.snippet")).slice(0, 10).map((el) => {
-      const link = el.querySelector("a.l1");
-      const desc = el.querySelector(".generic-snippet .content, .inline-qa-answer");
-      return {
-        title: link?.textContent?.replace(link.querySelector(".site-name-wrapper")?.textContent || "", "").trim() || "",
-        url: (link as HTMLAnchorElement)?.href || "",
-        snippet: desc?.textContent?.trim() || "",
-        source: "brave",
-      };
-    }).filter((r: any) => r.title && r.url);
+    return parseBraveResults(html);
   }
 
   // --- Google Search (Fallback) ---
 
-  private async searchGoogle(query: string): Promise<any[]> {
+  private async searchGoogle(query: string, locale: SearchLocale): Promise<any[]> {
     const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
     const response = await fetch(url, {
       headers: {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
         "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": locale.acceptLanguage,
       },
       signal: AbortSignal.timeout(10000),
     });
@@ -281,19 +213,7 @@ class WebSearchServer {
     if (!response.ok) return [];
 
     const html = await response.text();
-    const dom = new JSDOM(html);
-    const doc = dom.window.document;
-    return Array.from(doc.querySelectorAll("div.g")).slice(0, 7).map((el) => {
-      const titleEl = el.querySelector("h3");
-      const linkEl = el.querySelector("a") as HTMLAnchorElement;
-      const snippetEl = el.querySelector("div[style*='-webkit-line-clamp'], span.aCOpRe");
-      return {
-        title: titleEl?.textContent?.trim() || "",
-        url: linkEl?.href || "",
-        snippet: snippetEl?.textContent?.trim() || "",
-        source: "google",
-      };
-    }).filter((r: any) => r.title && r.url);
+    return parseGoogleResults(html);
   }
 
   private async getBrowser() {
@@ -397,30 +317,39 @@ class WebSearchServer {
     }
 
     const { query } = SearchSchema.parse(args);
+    let detectedLang: string | null = null;
+    let intent: SearchIntent | null = null;
+
+    if (this.crossLingual) {
+      detectedLang = await this.crossLingual.detectLanguage(query);
+      console.error(`Detected Language: ${detectedLang}`);
+
+      if (this.enableCrosslingual) {
+        intent = await this.cache.detectIntent(query);
+        console.error(`Detected Intent: ${intent}`);
+      }
+    }
+
+    const queryLocale = resolveSearchLocale(query, detectedLang);
 
     // 1. Check Semantic Search Cache
     const cachedResults = await this.cache.get(query);
     if (cachedResults) {
       return {
-        content: [{ type: "text", text: JSON.stringify(cachedResults, null, 2) }],
+        content: [{ type: "text", text: formatSearchResults(query, cachedResults) }],
       };
     }
 
     // 2. Optional Cross-lingual search
-    if (this.enableCrosslingual && this.crossLingual) {
-      const intent = await this.cache.detectIntent(query);
-      console.error(`Detected Intent: ${intent}`);
-
-      const lang = await this.crossLingual.detectLanguage(query);
-      console.error(`Detected Language: ${lang}`);
-
-      if (this.crossLingual.shouldCrossSearch(intent, lang)) {
-        const enQuery = await this.crossLingual.translateToEnglish(query, lang);
+    if (this.enableCrosslingual && this.crossLingual && intent && detectedLang) {
+      if (this.crossLingual.shouldCrossSearch(intent, detectedLang)) {
+        const enQuery = await this.crossLingual.translateToEnglish(query, detectedLang);
         console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
 
+        const englishLocale = resolveSearchLocale(enQuery, "eng_Latn");
         const [mainResults, auxResults] = await Promise.all([
-          this.executeProviderSearch(query),
-          this.executeProviderSearch(enQuery),
+          this.executeProviderSearch(query, queryLocale),
+          this.executeProviderSearch(enQuery, englishLocale),
         ]);
 
         const seen = new Set<string>();
@@ -434,13 +363,13 @@ class WebSearchServer {
         const rankedResults = await this.cache.reRankResults(query, merged);
         await this.cache.set(query, rankedResults);
         return {
-          content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+          content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
         };
       }
     }
 
     // 3. Standard Search with fallback across configured providers
-    const results = await this.executeProviderSearch(query);
+    const results = await this.executeProviderSearch(query, queryLocale);
 
     if (results.length === 0) {
       const configured = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing,brave,google");
@@ -455,20 +384,21 @@ class WebSearchServer {
     await this.cache.set(query, rankedResults);
 
     return {
-      content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+      content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
     };
   }
 
-  private async executeProviderSearch(query: string): Promise<any[]> {
+  private async executeProviderSearch(query: string, locale: SearchLocale): Promise<any[]> {
     for (const provider of this.providers) {
       try {
-        const results = await provider.execute(query);
+        const results = await provider.execute(query, locale);
         if (results.length > 0) {
-          console.error(`Provider returned ${results.length} results`);
+          console.error(`Provider ${provider.name} returned ${results.length} results`);
           return results;
         }
+        console.error(`Provider ${provider.name} returned 0 parsed results`);
       } catch (e) {
-        console.error(`Provider error:`, e instanceof Error ? e.message : String(e));
+        console.error(`Provider ${provider.name} error:`, e instanceof Error ? e.message : String(e));
       }
     }
     return [];
@@ -512,7 +442,21 @@ class WebSearchServer {
     const page = await context.newPage();
 
     try {
-      const response = await page.goto(url, { waitUntil: this.fetchWaitUntil, timeout: 30000 });
+      let response;
+      try {
+        response = await page.goto(url, { waitUntil: this.fetchWaitUntil, timeout: 30000 });
+      } catch (error) {
+        const shouldRetry =
+          this.fetchWaitUntil === "networkidle" &&
+          error instanceof Error &&
+          error.name === "TimeoutError";
+
+        if (!shouldRetry) throw error;
+
+        console.error(`Fetch navigation timed out with networkidle for ${url}, retrying with domcontentloaded`);
+        response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      }
+
       const buffer = await response?.body();
       
       if (!buffer) {
@@ -585,6 +529,50 @@ function citeToUrl(text: string): string {
   } catch {
     return "";
   }
+}
+
+function formatSearchResults(query: string, results: any[]): string {
+  // Extract version info from results (e.g. "Laravel 13", "v3.2.1")
+  const versionPattern = /(\d+\.\d+(?:\.\d+)?)/g;
+  const labeledPatterns = [
+    { label: null, re: /(?:^|\s)(\d+)\.(\d+)(?:\.(\d+))?/g },
+  ];
+
+  const foundVersions: { label: string; major: number; minor: number; patch: number }[] = [];
+
+  for (const r of results) {
+    const text = `${r.title} ${r.snippet}`;
+    let m: RegExpExecArray | null;
+    const re = /(?:^|\s)(\d+)\.(\d+)(?:\.(\d+))?/g;
+    while ((m = re.exec(text)) !== null) {
+      const before = text.slice(Math.max(0, m.index - 20), m.index);
+      const labelMatch = before.match(/(\w+)\s*$/);
+      const label = labelMatch ? labelMatch[1] : "";
+      foundVersions.push({
+        label,
+        major: parseInt(m[1]),
+        minor: parseInt(m[2]),
+        patch: m[3] ? parseInt(m[3]) : 0,
+      });
+    }
+  }
+
+  let summary = "";
+  if (foundVersions.length > 0) {
+    const best = foundVersions.reduce((a, b) =>
+      a.major !== b.major ? (a.major > b.major ? a : b) :
+      a.minor !== b.minor ? (a.minor > b.minor ? a : b) :
+      a.patch > b.patch ? a : b
+    );
+    const labelText = best.label ? `${best.label} ${best.major}.${best.minor}` : `v${best.major}.${best.minor}`;
+    summary = `Answer: The latest version found is ${labelText}.\n\n`;
+  }
+
+  const formatted = results.map((r, i) =>
+    `${i + 1}. "${r.title}" - ${r.url}\n   ${r.snippet || "(no description)"}`
+  ).join("\n\n");
+
+  return summary + formatted;
 }
 
 const server = new WebSearchServer();
