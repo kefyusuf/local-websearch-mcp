@@ -23,6 +23,7 @@ export interface CacheMetadata {
 
 export interface IEmbeddingProvider {
   getEmbedding(text: string): Promise<number[]>;
+  isAvailable(): boolean;
 }
 
 export interface VectorMatch {

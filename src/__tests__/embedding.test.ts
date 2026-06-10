@@ -31,5 +31,6 @@ describe("TransformersEmbeddingProvider", () => {
     const provider = new TransformersEmbeddingProvider();
     const embedding = await provider.getEmbedding("hello");
     expect(embedding).toEqual([]);
+    expect(provider.isAvailable()).toBe(false);
   });
 });

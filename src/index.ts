@@ -4,7 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
-import { chromium, Browser } from "playwright";
+import { chromium, Browser, BrowserContext } from "playwright";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
 import TurndownService from "turndown";
@@ -16,6 +16,7 @@ import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
 import { CrossLingualEngine } from "./cache/crosslingual.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
+import { SearchIntent } from "./cache/intent.js";
 
 // --- Types & Schemas ---
 
@@ -28,16 +29,49 @@ const FetchSchema = z.object({
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
 });
 
+// --- Search Provider Types ---
+
+type SearchProvider = {
+  priority: number;
+  execute: (query: string) => Promise<any[]>;
+};
+
+type ProviderResult = {
+  results: any[];
+  provider: string;
+};
+
+// --- Env Configuration ---
+
+function getEnvArray(key: string, defaultVal: string): string[] {
+  const raw = process.env[key] || defaultVal;
+  return raw.split(",").map(s => s.trim().toLowerCase()).filter(Boolean);
+}
+
+function getEnv(key: string, defaultVal: string): string {
+  return process.env[key] || defaultVal;
+}
+
+function getEnvBool(key: string, defaultVal: boolean): boolean {
+  const raw = process.env[key];
+  if (raw === undefined) return defaultVal;
+  return raw === "true" || raw === "1";
+}
+
 // --- Server Implementation ---
 
 class WebSearchServer {
   private server: Server;
   private browser: Browser | null = null;
+  private browserContext: BrowserContext | null = null;
   private turndown: TurndownService;
   private cache: SemanticCache;
-  private crossLingual: CrossLingualEngine;
+  private crossLingual: CrossLingualEngine | null = null;
   private searchLimiter: TokenBucket;
   private fetchLimiter: TokenBucket;
+  private providers: SearchProvider[] = [];
+  private enableCrosslingual: boolean;
+  private fetchWaitUntil: "domcontentloaded" | "networkidle";
 
   constructor() {
     this.server = new Server(
@@ -58,16 +92,208 @@ class WebSearchServer {
       emDelimiter: "_",
     });
 
+    this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
+    this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
+
     // Initialize Semantic Cache with SQLite for persistence
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore("websearch_cache.db");
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
-    this.crossLingual = new CrossLingualEngine();
+
+    if (this.enableCrosslingual) {
+      this.crossLingual = new CrossLingualEngine();
+    }
+
     this.searchLimiter = createSearchRateLimiter();
     this.fetchLimiter = createFetchRateLimiter();
 
+    this.setupProviders();
     this.setupTools();
     this.setupShutdownHandlers();
+  }
+
+  private setupProviders() {
+    const order = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing,brave,google");
+
+    const registry: Record<string, (query: string) => Promise<any[]>> = {
+      duckduckgo: (q) => this.searchDDG(q),
+      bing: (q) => this.searchBing(q),
+      brave: (q) => this.searchBrave(q),
+      google: (q) => this.searchGoogle(q),
+    };
+
+    this.providers = [];
+    for (const name of order) {
+      if (registry[name]) {
+        this.providers.push({ priority: this.providers.length, execute: registry[name] });
+        console.error(`Search provider registered: ${name}`);
+      } else {
+        console.error(`Unknown search provider in SEARCH_PROVIDERS: ${name}`);
+      }
+    }
+
+    if (this.providers.length === 0) {
+      console.error("No valid search providers configured. Defaulting to duckduckgo.");
+      this.providers.push({ priority: 0, execute: (q) => this.searchDDG(q) });
+    }
+  }
+
+  // --- DuckDuckGo Lite Search ---
+
+  private async searchDDG(query: string): Promise<any[]> {
+    const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+    const results: any[] = [];
+    const rows = doc.querySelectorAll("table.result tr");
+
+    // DDG Lite returns results in <table class="result"> with alternating rows
+    let currentTitle = "";
+    let currentUrl = "";
+    let currentSnippet = "";
+
+    rows.forEach((row) => {
+      const links = row.querySelectorAll("a");
+      const tds = row.querySelectorAll("td");
+
+      // Title + URL row
+      if (links.length > 0) {
+        links.forEach((link) => {
+          const href = link.getAttribute("href") || "";
+          if (href.startsWith("http")) {
+            currentUrl = href;
+          }
+        });
+        const snippetTd = row.querySelector("td.snippet, td.result-snippet");
+        if (snippetTd) {
+          currentSnippet = snippetTd.textContent?.trim() || "";
+        }
+        const titleEl = row.querySelector(".result-link a, a.result-link");
+        if (titleEl) {
+          currentTitle = titleEl.textContent?.trim() || "";
+          if (currentTitle && currentUrl) {
+            results.push({ title: currentTitle, url: currentUrl, snippet: currentSnippet, source: "duckduckgo" });
+            currentTitle = "";
+            currentUrl = "";
+            currentSnippet = "";
+          }
+        }
+      }
+
+      // Snippet-only row (alternate row in DDG Lite table)
+      if (tds.length === 1 && !currentUrl) {
+        const text = tds[0].textContent?.trim();
+        if (text && results.length > 0) {
+          results[results.length - 1].snippet = text;
+        }
+      }
+    });
+
+    return results.slice(0, 10).filter((r: any) => r.title && r.url);
+  }
+
+  // --- Bing Search (Fallback) ---
+
+  private async searchBing(query: string): Promise<any[]> {
+    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=en-US`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      signal: AbortSignal.timeout(15000),
+    });
+
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+    return Array.from(doc.querySelectorAll(".b_algo")).slice(0, 10).map((el) => {
+      const h2 = el.querySelector("h2");
+      const link = h2?.querySelector("a");
+      const desc = el.querySelector(".b_caption p");
+      const cite = el.querySelector("cite");
+      const rawUrl = link?.getAttribute("href") || "";
+      const cleanUrl = citeToUrl(cite?.textContent?.trim() || "") || rawUrl;
+      return {
+        title: h2?.textContent?.trim() || "",
+        url: cleanUrl,
+        snippet: desc?.textContent?.trim() || "",
+        source: "bing",
+      };
+    }).filter((r: any) => r.title && r.url);
+  }
+
+  // --- Brave Search (Fallback) ---
+
+  private async searchBrave(query: string): Promise<any[]> {
+    const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+    return Array.from(doc.querySelectorAll("div.snippet")).slice(0, 10).map((el) => {
+      const link = el.querySelector("a.l1");
+      const desc = el.querySelector(".generic-snippet .content, .inline-qa-answer");
+      return {
+        title: link?.textContent?.replace(link.querySelector(".site-name-wrapper")?.textContent || "", "").trim() || "",
+        url: (link as HTMLAnchorElement)?.href || "",
+        snippet: desc?.textContent?.trim() || "",
+        source: "brave",
+      };
+    }).filter((r: any) => r.title && r.url);
+  }
+
+  // --- Google Search (Fallback) ---
+
+  private async searchGoogle(query: string): Promise<any[]> {
+    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
+    const response = await fetch(url, {
+      headers: {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      },
+      signal: AbortSignal.timeout(10000),
+    });
+
+    if (!response.ok) return [];
+
+    const html = await response.text();
+    const dom = new JSDOM(html);
+    const doc = dom.window.document;
+    return Array.from(doc.querySelectorAll("div.g")).slice(0, 7).map((el) => {
+      const titleEl = el.querySelector("h3");
+      const linkEl = el.querySelector("a") as HTMLAnchorElement;
+      const snippetEl = el.querySelector("div[style*='-webkit-line-clamp'], span.aCOpRe");
+      return {
+        title: titleEl?.textContent?.trim() || "",
+        url: linkEl?.href || "",
+        snippet: snippetEl?.textContent?.trim() || "",
+        source: "google",
+      };
+    }).filter((r: any) => r.title && r.url);
   }
 
   private async getBrowser() {
@@ -78,11 +304,26 @@ class WebSearchServer {
     return this.browser;
   }
 
+  private async getBrowserContext(): Promise<BrowserContext> {
+    if (!this.browserContext) {
+      const browser = await this.getBrowser();
+      this.browserContext = await browser.newContext({
+        userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+      });
+      console.error("Persistent browser context created.");
+    }
+    return this.browserContext;
+  }
+
   private setupShutdownHandlers() {
     const shutdown = async () => {
       console.error("Shutting down Web Search MCP Server...");
+      if (this.browserContext) {
+        try { await this.browserContext.close(); } catch {}
+        this.browserContext = null;
+      }
       if (this.browser) {
-        await this.browser.close();
+        try { await this.browser.close(); } catch {}
         this.browser = null;
       }
       this.cache.close();
@@ -98,7 +339,7 @@ class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return top results re-ranked by relevance. Supports fallback to multiple engines.",
+          description: "Search the web and return top results re-ranked by relevance. Supports multiple search engines with automatic fallback.",
           inputSchema: {
             type: "object",
             properties: {
@@ -127,242 +368,159 @@ class WebSearchServer {
 
       try {
         if (name === "web_search") {
-          const { allowed, retryAfterMs } = this.searchLimiter.tryConsume();
-          if (!allowed) {
-            const seconds = Math.ceil(retryAfterMs / 1000);
-            return {
-              content: [{ type: "text", text: `Rate limit exceeded: web_search allows ${process.env.RATE_LIMIT_SEARCH_PER_MIN || "10"} requests per minute. Retry in ${seconds} seconds.` }],
-              isError: true,
-            };
-          }
-
-          const { query } = SearchSchema.parse(args);
-          
-          // 1. Detect Intent (Technical, News, etc.)
-          const intent = await this.cache.detectIntent(query);
-          console.error(`Detected Intent: ${intent}`);
-
-          // 2. Check Semantic Search Cache
-          const cachedResults = await this.cache.get(query);
-          if (cachedResults) {
-            return {
-              content: [{ type: "text", text: JSON.stringify(cachedResults, null, 2) }],
-            };
-          }
-
-          // 3. Detect language for cross-lingual search
-          const lang = await this.crossLingual.detectLanguage(query);
-          console.error(`Detected Language: ${lang}`);
-
-          // 4. Cross-lingual search for non-English technical queries
-          if (this.crossLingual.shouldCrossSearch(intent, lang)) {
-            const enQuery = await this.crossLingual.translateToEnglish(query, lang);
-            console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
-
-            const [mainResults, auxResults] = await Promise.all([
-              this.performSearch(query),
-              this.performSearch(enQuery),
-            ]);
-
-            const seen = new Set<string>();
-            const merged = [...mainResults, ...auxResults].filter(r => {
-              const key = r.url.toLowerCase();
-              if (seen.has(key)) return false;
-              seen.add(key);
-              return true;
-            });
-
-            const rankedResults = await this.cache.reRankResults(query, merged);
-            await this.cache.set(query, rankedResults);
-            return {
-              content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
-            };
-          }
-
-          // 5. Standard Search (with Fallback)
-          const results = await this.handleWebSearch(query);
-           
-          // 6. Semantic Re-ranking
-          if (results.content[0].type === "text") {
-            try {
-              const parsedResults = JSON.parse(results.content[0].text);
-              const rankedResults = await this.cache.reRankResults(query, parsedResults);
-              await this.cache.set(query, rankedResults);
-              return {
-                content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
-              };
-            } catch (e) {
-              return results;
-            }
-          }
-           
-          return results;
+          return await this.handleSearch(args);
         } else if (name === "fetch_content") {
-          const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
-          if (!allowed) {
-            const seconds = Math.ceil(retryAfterMs / 1000);
-            return {
-              content: [{ type: "text", text: `Rate limit exceeded: fetch_content allows ${process.env.RATE_LIMIT_FETCH_PER_MIN || "20"} requests per minute. Retry in ${seconds} seconds.` }],
-              isError: true,
-            };
-          }
-
-          const { url, force_refresh } = FetchSchema.parse(args);
-          
-          // 1. Check Content Cache
-          if (!force_refresh) {
-            const cachedContent = await this.cache.getCachedContent(url);
-            if (cachedContent) {
-              return {
-                content: [{ type: "text", text: cachedContent }],
-              };
-            }
-          }
-
-          // 2. Fetch Fresh Content
-          const results = await this.handleFetchContent(url);
-          return results;
+          return await this.handleFetch(args);
         } else {
-          throw new Error(`Unknown tool: ${name}`);
+          return {
+            content: [{ type: "text", text: `Unknown tool: ${name}` }],
+            isError: true,
+          };
         }
       } catch (error: unknown) {
         return {
-          content: [{ type: "text", text: `Error: ${error instanceof Error ? error.message : String(error)}` }],
+          content: [{ type: "text", text: `Internal error: ${error instanceof Error ? error.message : String(error)}` }],
           isError: true,
         };
       }
     });
   }
 
-  private async performSearch(query: string): Promise<any[]> {
-    const browser = await this.getBrowser();
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    });
-    const page = await context.newPage();
+  private async handleSearch(args: unknown) {
+    const { allowed, retryAfterMs } = this.searchLimiter.tryConsume();
+    if (!allowed) {
+      const seconds = Math.ceil(retryAfterMs / 1000);
+      return {
+        content: [{ type: "text", text: `Rate limit exceeded: web_search allows ${process.env.RATE_LIMIT_SEARCH_PER_MIN || "10"} requests per minute. Retry in ${seconds} seconds.` }],
+        isError: true,
+      };
+    }
 
-    try {
-      // Primary: Brave Search
-      try {
-        const searchUrl = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
-        await page.goto(searchUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-        await page.waitForSelector("div.snippet", { timeout: 10000 });
+    const { query } = SearchSchema.parse(args);
 
-        const results = await page.$$eval("div.snippet", (elements) => {
-          return elements.slice(0, 10).map((el) => {
-            const titleEl = el.querySelector(".title");
-            const linkEl = el.querySelector("a") as HTMLAnchorElement;
-            const snippetEl = el.querySelector(".snippet-description, .snippet-content");
-            return {
-              title: titleEl?.textContent?.trim() || "",
-              url: linkEl?.href || "",
-              snippet: snippetEl?.textContent?.trim() || "",
-              source: "brave"
-            };
-          }).filter((r: any) => r.title && r.url);
+    // 1. Check Semantic Search Cache
+    const cachedResults = await this.cache.get(query);
+    if (cachedResults) {
+      return {
+        content: [{ type: "text", text: JSON.stringify(cachedResults, null, 2) }],
+      };
+    }
+
+    // 2. Optional Cross-lingual search
+    if (this.enableCrosslingual && this.crossLingual) {
+      const intent = await this.cache.detectIntent(query);
+      console.error(`Detected Intent: ${intent}`);
+
+      const lang = await this.crossLingual.detectLanguage(query);
+      console.error(`Detected Language: ${lang}`);
+
+      if (this.crossLingual.shouldCrossSearch(intent, lang)) {
+        const enQuery = await this.crossLingual.translateToEnglish(query, lang);
+        console.error(`Cross-lingual: "${query}" → "${enQuery}"`);
+
+        const [mainResults, auxResults] = await Promise.all([
+          this.executeProviderSearch(query),
+          this.executeProviderSearch(enQuery),
+        ]);
+
+        const seen = new Set<string>();
+        const merged = [...mainResults, ...auxResults].filter(r => {
+          const key = r.url.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
         });
 
-        if (results.length > 0) return results;
-      } catch (e) {
-        console.error("Brave Search failed, trying fallback...");
-      }
-
-      // Fallback 1: Google Web-only
-      try {
-        const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
-        await page.goto(googleUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-
-        // Detect captcha or rate-limiting pages
-        const pageTitle = await page.title();
-        if (/captcha|unusual traffic/i.test(pageTitle)) {
-          console.error("Google blocked the request — captcha or rate-limit detected");
-          throw new Error("Google captcha/rate-limit");
-        }
-
-        const results = await page.$$eval("div.g", (elements) => {
-          return elements.slice(0, 7).map((el) => {
-            const titleEl = el.querySelector("h3");
-            const linkEl = el.querySelector("a") as HTMLAnchorElement;
-            const snippetEl = el.querySelector("div[style*='-webkit-line-clamp']");
-            return {
-              title: titleEl?.innerText || "",
-              url: linkEl?.href || "",
-              snippet: snippetEl?.textContent?.trim() || "",
-              source: "google"
-            };
-          }).filter((r: any) => r.title && r.url);
-        });
-
-        if (results.length > 0) return results;
-        console.error("Google returned zero results — likely DOM structure change (selector div.g may be outdated)");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("Google fallback failed (" + msg + "), trying DuckDuckGo...");
-      }
-
-      // Fallback 2: DuckDuckGo Lite
-      try {
-        const ddgUrl = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-        const response = await page.goto(ddgUrl, { waitUntil: "domcontentloaded", timeout: 15000 });
-        if (response && response.status() >= 400) {
-          console.error(`DuckDuckGo returned status ${response.status()}`);
-        }
-        const results = await page.$$eval("a.result-link", (links) => {
-          return links.slice(0, 10).map((link) => {
-            const row = link.closest("tr");
-            const snippetEl = row?.querySelector("td.result-snippet");
-            return {
-              title: link.textContent?.trim() || "",
-              url: (link as HTMLAnchorElement).href || "",
-              snippet: snippetEl?.textContent?.trim() || "",
-              source: "duckduckgo"
-            };
-          }).filter((r: any) => r.title && r.url);
-        });
-
-        if (results.length > 0) return results;
-        console.error("DuckDuckGo returned zero results — endpoint may have changed");
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e);
-        console.error("DuckDuckGo fallback failed (" + msg + ")");
-      }
-
-      return [];
-    } finally {
-      try {
-        await context.close();
-      } catch (e) {
-        console.error("Error closing browser context:", e);
+        const rankedResults = await this.cache.reRankResults(query, merged);
+        await this.cache.set(query, rankedResults);
+        return {
+          content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+        };
       }
     }
+
+    // 3. Standard Search with fallback across configured providers
+    const results = await this.executeProviderSearch(query);
+
+    if (results.length === 0) {
+      const configured = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing,brave,google");
+      return {
+        content: [{ type: "text", text: `Search failed: all configured providers returned no results. Tried: ${configured.join(", ")}. Check network connectivity or SEARCH_PROVIDERS env.` }],
+        isError: true,
+      };
+    }
+
+    // 4. Semantic Re-ranking
+    const rankedResults = await this.cache.reRankResults(query, results);
+    await this.cache.set(query, rankedResults);
+
+    return {
+      content: [{ type: "text", text: JSON.stringify(rankedResults, null, 2) }],
+    };
   }
 
-  private async handleWebSearch(query: string) {
-    const results = await this.performSearch(query);
-    if (results.length === 0) throw new Error("All search providers failed.");
-    return { content: [{ type: "text", text: JSON.stringify(results) }] };
+  private async executeProviderSearch(query: string): Promise<any[]> {
+    for (const provider of this.providers) {
+      try {
+        const results = await provider.execute(query);
+        if (results.length > 0) {
+          console.error(`Provider returned ${results.length} results`);
+          return results;
+        }
+      } catch (e) {
+        console.error(`Provider error:`, e instanceof Error ? e.message : String(e));
+      }
+    }
+    return [];
   }
 
-  private async handleFetchContent(url: string) {
+  private async handleFetch(args: unknown) {
+    const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
+    if (!allowed) {
+      const seconds = Math.ceil(retryAfterMs / 1000);
+      return {
+        content: [{ type: "text", text: `Rate limit exceeded: fetch_content allows ${process.env.RATE_LIMIT_FETCH_PER_MIN || "20"} requests per minute. Retry in ${seconds} seconds.` }],
+        isError: true,
+      };
+    }
+
+    const { url, force_refresh } = FetchSchema.parse(args);
+
     // SSRF Protection: Block local/private resources via DNS resolution
     const parsedUrl = new URL(url);
     const hostname = parsedUrl.hostname;
 
     if (await isPrivateHost(hostname)) {
-      throw new Error(`Access to local/private resource is blocked for security reasons: ${hostname}`);
+      return {
+        content: [{ type: "text", text: `Access to local/private resource is blocked for security reasons: ${hostname}` }],
+        isError: true,
+      };
     }
 
-    const browser = await this.getBrowser();
-    const context = await browser.newContext({
-      userAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    });
+    // 1. Check Content Cache
+    if (!force_refresh) {
+      const cachedContent = await this.cache.getCachedContent(url);
+      if (cachedContent) {
+        return {
+          content: [{ type: "text", text: cachedContent }],
+        };
+      }
+    }
+
+    // 2. Fetch Fresh Content
+    const context = await this.getBrowserContext();
     const page = await context.newPage();
 
     try {
-      const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
+      const response = await page.goto(url, { waitUntil: this.fetchWaitUntil, timeout: 30000 });
       const buffer = await response?.body();
       
-      if (!buffer) throw new Error("Could not fetch page content.");
+      if (!buffer) {
+        return {
+          content: [{ type: "text", text: "Could not fetch page content." }],
+          isError: true,
+        };
+      }
 
       let html = buffer.toString("utf-8");
       // Detect charset from meta tag for proper encoding
@@ -379,23 +537,34 @@ class WebSearchServer {
       const reader = new Readability(dom.window.document);
       const article = reader.parse();
 
-      if (!article || !article.content) throw new Error("Could not parse article content.");
+      if (!article || !article.content) {
+        return {
+          content: [{ type: "text", text: "Could not parse article content from the page." }],
+          isError: true,
+        };
+      }
 
       const markdown = this.turndown.turndown(article.content);
       const title = article.title || "Untitled Page";
       const fullText = `# ${title}\n\n${markdown}`;
 
-      // Save to Content Cache
-      await this.cache.setCachedContent(url, fullText, title);
+      // Detect intent for TTL-based caching
+      let intent: SearchIntent | undefined;
+      if (this.enableCrosslingual) {
+        intent = await this.cache.detectIntent(title + " " + markdown.slice(0, 200));
+      }
+
+      // Save to Content Cache with intent-based TTL
+      await this.cache.setCachedContent(url, fullText, title, intent);
 
       return {
         content: [{ type: "text", text: fullText }],
       };
     } finally {
       try {
-        await context.close();
+        await page.close();
       } catch (e) {
-        console.error("Error closing browser context:", e);
+        console.error("Error closing page:", e);
       }
     }
   }
@@ -404,6 +573,17 @@ class WebSearchServer {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
     console.error("Web Search MCP Server running on stdio");
+  }
+}
+
+function citeToUrl(text: string): string {
+  if (!text) return "";
+  try {
+    const url = text.replace(/\s*›\s*/g, "/").replace(/\s+/g, "");
+    new URL(url);
+    return url;
+  } catch {
+    return "";
   }
 }
 

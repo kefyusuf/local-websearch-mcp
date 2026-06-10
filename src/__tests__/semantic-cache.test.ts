@@ -9,6 +9,7 @@ function createMockEmbedding(vectors: Record<string, number[]>): IEmbeddingProvi
       if (vectors[text]) return vectors[text];
       return new Array(384).fill(0.01);
     }),
+    isAvailable: vi.fn(() => true),
   };
 }
 

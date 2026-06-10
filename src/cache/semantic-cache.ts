@@ -3,12 +3,13 @@ import { SearchIntentClassifier, SearchIntent } from "./intent.js";
 import { cosineSimilarity } from "./utils.js";
 
 const TTL_MAP: Record<string, number> = {
-  news: 1 * 24 * 60 * 60 * 1000,    // 1 Day
-  blog: 5 * 24 * 60 * 60 * 1000,    // 5 Days
-  docs: 30 * 24 * 60 * 60 * 1000,   // 30 Days
+  price: 15 * 60 * 1000,              // 15 minutes
+  news: 1 * 60 * 60 * 1000,           // 1 Hour
+  blog: 5 * 24 * 60 * 60 * 1000,     // 5 Days
+  docs: 30 * 24 * 60 * 60 * 1000,    // 30 Days
   technical: 30 * 24 * 60 * 60 * 1000, // 30 Days
-  social: 3 * 24 * 60 * 60 * 1000,  // 3 Days
-  general: 7 * 24 * 60 * 60 * 1000, // 7 Days
+  social: 3 * 24 * 60 * 60 * 1000,   // 3 Days
+  general: 7 * 24 * 60 * 60 * 1000,  // 7 Days
 };
 
 export class SemanticCache {
@@ -20,7 +21,7 @@ export class SemanticCache {
   constructor(
     embeddingProvider: IEmbeddingProvider,
     vectorStore: IVectorStore,
-    threshold: number = 0.90
+    threshold: number = 0.75
   ) {
     this.embeddingProvider = embeddingProvider;
     this.vectorStore = vectorStore;
@@ -36,11 +37,20 @@ export class SemanticCache {
     this.vectorStore.close();
   }
 
+  private async getQueryVector(query: string): Promise<number[] | null> {
+    if (!this.embeddingProvider.isAvailable()) return null;
+    const vector = await this.embeddingProvider.getEmbedding(query);
+    if (vector.length === 0) return null;
+    return vector;
+  }
+
   // --- Semantic Search Cache ---
 
   async get(query: string): Promise<SearchResultItem[] | null> {
     try {
-      const vector = await this.embeddingProvider.getEmbedding(query);
+      const vector = await this.getQueryVector(query);
+      if (!vector) return null;
+
       const matches = await this.vectorStore.search(vector, 1);
 
       if (matches.length > 0 && matches[0].score >= this.threshold) {
@@ -55,7 +65,9 @@ export class SemanticCache {
 
   async set(query: string, results: SearchResultItem[]): Promise<void> {
     try {
-      const vector = await this.embeddingProvider.getEmbedding(query);
+      const vector = await this.getQueryVector(query);
+      if (!vector) return;
+
       const normalized = query.trim().toLowerCase();
       const id = Buffer.from(normalized).toString("base64");
       const metadata: CacheMetadata = {
@@ -70,6 +82,12 @@ export class SemanticCache {
   }
 
   // --- Full Content Cache with TTL ---
+
+  private intentToContentCategory(intent: SearchIntent): string {
+    if (intent === "news") return "news";
+    if (intent === "technical") return "technical";
+    return "general";
+  }
 
   async getCachedContent(url: string): Promise<string | null> {
     const entry = await this.vectorStore.getContent(url);
@@ -87,8 +105,10 @@ export class SemanticCache {
     return entry.content;
   }
 
-  async setCachedContent(url: string, content: string, title: string): Promise<void> {
-    const category = this.detectCategory(url, title);
+  async setCachedContent(url: string, content: string, title: string, intent?: SearchIntent): Promise<void> {
+    const category = intent
+      ? this.intentToContentCategory(intent)
+      : this.detectCategory(url, title);
     await this.vectorStore.setContent(url, content, category);
   }
 
@@ -108,12 +128,15 @@ export class SemanticCache {
   async reRankResults(query: string, results: SearchResultItem[]): Promise<SearchResultItem[]> {
     if (results.length === 0) return results;
 
+    const queryVector = await this.getQueryVector(query);
+    if (!queryVector) return results;
+
     try {
-      const queryVector = await this.embeddingProvider.getEmbedding(query);
       const rankedResults = await Promise.all(
         results.map(async (res) => {
           const text = `${res.title} ${res.snippet}`;
           const resVector = await this.embeddingProvider.getEmbedding(text);
+          if (resVector.length === 0) return { ...res, semanticScore: 0 };
           const score = cosineSimilarity(queryVector, resVector);
           return { ...res, semanticScore: score };
         })

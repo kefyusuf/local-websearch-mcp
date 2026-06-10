@@ -27,9 +27,13 @@ export class TransformersEmbeddingProvider implements IEmbeddingProvider {
 
   async getEmbedding(text: string): Promise<number[]> {
     const extractor = await this.getExtractor();
-    if (!extractor) return [];
+    if (!extractor || this.extractorFailed) return [];
     const truncated = text.slice(0, 512);
     const output = await extractor(truncated, { pooling: "mean", normalize: true });
     return Array.from(output.data);
+  }
+
+  isAvailable(): boolean {
+    return !this.extractorFailed && this.extractor !== null;
   }
 }

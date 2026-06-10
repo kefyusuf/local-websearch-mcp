@@ -49,7 +49,7 @@ function parseRateLimit(raw: string | undefined, defaultValue: number): TokenBuc
     });
   }
   return new TokenBucket({
-    maxTokens: Math.min(perMinute, 5),
+    maxTokens: perMinute,
     refillRatePerSecond: perMinute / 60,
   });
 }
