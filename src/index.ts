@@ -37,6 +37,10 @@ const FetchSchema = z.object({
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
 });
 
+const AnswerSchema = z.object({
+  question: z.string().min(1).describe("The question to answer (e.g. 'what is the latest Laravel version?')"),
+});
+
 // --- Search Provider Types ---
 
 type SearchProvider = {
@@ -280,6 +284,17 @@ class WebSearchServer {
             required: ["url"],
           },
         },
+        {
+          name: "get_answer",
+          description: "Answer a factual question by searching the web and extracting the answer from live content. Use this for questions about versions, prices, dates, or any current information.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              question: { type: "string" },
+            },
+            required: ["question"],
+          },
+        },
       ],
     }));
 
@@ -291,6 +306,8 @@ class WebSearchServer {
           return await this.handleSearch(args);
         } else if (name === "fetch_content") {
           return await this.handleFetch(args);
+        } else if (name === "get_answer") {
+          return await this.handleAnswer(args);
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -513,6 +530,77 @@ class WebSearchServer {
     }
   }
 
+  private async handleAnswer(args: unknown) {
+    const { question } = AnswerSchema.parse(args);
+
+    // 1. Search
+    const queryLocale = resolveSearchLocale(question, "eng_Latn");
+    const results = await this.executeProviderSearch(question, queryLocale);
+
+    if (results.length === 0) {
+      return {
+        content: [{ type: "text", text: `Could not find any results for "${question}".` }],
+        isError: true,
+      };
+    }
+
+    // 2. Fetch top 2 results
+    const urls = results.slice(0, 2).map(r => r.url);
+    const pages = await Promise.all(urls.map(url => this.fetchPageContent(url)));
+
+    // 3. Extract answer from fetched content
+    const validPages = pages.filter(p => p !== null) as { url: string; title: string; content: string }[];
+    if (validPages.length === 0) {
+      // Fallback: return ranked results
+      const ranked = await this.cache.reRankResults(question, results);
+      return {
+        content: [{ type: "text", text: formatSearchResults(question, ranked) }],
+      };
+    }
+
+    // Combine content for answer extraction
+    const combinedContent = validPages.map(p => `# ${p.title}\n${p.content}`).join("\n\n---\n\n");
+    const extracted = extractAnswerFromContent(question, combinedContent, validPages.map(p => p.url));
+
+    return {
+      content: [{ type: "text", text: extracted }],
+    };
+  }
+
+  private async fetchPageContent(url: string): Promise<{ url: string; title: string; content: string } | null> {
+    try {
+      const context = await this.getBrowserContext();
+      const page = await context.newPage();
+      try {
+        const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
+        const buffer = await response?.body();
+        if (!buffer) return null;
+
+        let html = buffer.toString("utf-8");
+        const head = buffer.subarray(0, 2048).toString("ascii");
+        const charsetMatch = head.match(/<meta[^>]+charset=["']?\s*([a-zA-Z0-9-]+)/i);
+        if (charsetMatch) {
+          const detectedCharset = charsetMatch[1].toLowerCase();
+          if (detectedCharset !== "utf-8" && !detectedCharset.includes("utf")) {
+            html = iconv.decode(buffer, detectedCharset);
+          }
+        }
+
+        const dom = new JSDOM(html, { url });
+        const reader = new Readability(dom.window.document);
+        const article = reader.parse();
+        if (!article || !article.content) return null;
+
+        const markdown = this.turndown.turndown(article.content);
+        return { url, title: article.title || "Untitled", content: markdown };
+      } finally {
+        await page.close().catch(() => {});
+      }
+    } catch {
+      return null;
+    }
+  }
+
   async run() {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
@@ -529,6 +617,87 @@ function citeToUrl(text: string): string {
   } catch {
     return "";
   }
+}
+
+function extractAnswerFromContent(question: string, combinedContent: string, sourceUrls: string[]): string {
+  const lowerContent = combinedContent.toLowerCase();
+  const lowerQuestion = question.toLowerCase();
+  const questionWords = lowerQuestion.split(/\s+/);
+
+  // Extract version numbers from content
+  const versionRegex = /(\w+)\s+(\d+)\.(\d+)(?:\.(\d+))?/g;
+  const versions: { name: string; major: number; minor: number; patch: number; context: string }[] = [];
+  let match: RegExpExecArray | null;
+
+  while ((match = versionRegex.exec(combinedContent)) !== null) {
+    const name = match[1];
+    const major = parseInt(match[2]);
+    const minor = parseInt(match[3]);
+    const patch = match[4] ? parseInt(match[4]) : 0;
+    const start = Math.max(0, match.index - 60);
+    const end = Math.min(combinedContent.length, match.index + match[0].length + 100);
+    const context = combinedContent.slice(start, end).replace(/\n+/g, " ").trim();
+    versions.push({ name, major, minor, patch, context });
+  }
+
+  // Find best answer
+  let answer = "";
+
+  // Strategy 1: Version question with labeled versions
+  if (versions.length > 0) {
+    // Find versions whose name appears in the question
+    const relevantVersions = versions.filter(v => {
+      const nameLower = v.name.toLowerCase();
+      return questionWords.some(w => nameLower.includes(w) || w.includes(nameLower));
+    });
+
+    const candidates = relevantVersions.length > 0 ? relevantVersions : versions;
+
+    const best = candidates.reduce((a, b) =>
+      a.major !== b.major ? (a.major > b.major ? a : b) :
+      a.minor !== b.minor ? (a.minor > b.minor ? a : b) :
+      a.patch > b.patch ? a : b
+    );
+
+    answer = `The latest ${best.name} version is ${best.name} ${best.major}.${best.minor}` +
+      (best.patch > 0 ? `.${best.patch}` : "") + ".\n";
+
+    // Add context from source
+    const contextClean = best.context
+      .replace(best.name, `**${best.name} ${best.major}.${best.minor}**`);
+    answer += `\nContext: ${contextClean}\n`;
+  }
+
+  // Strategy 2: General factual answer - find sentence with most question word matches
+  if (!answer) {
+    const sentences = combinedContent.split(/[.!?]+\s+/);
+    let bestSentence = "";
+    let bestScore = 0;
+
+    for (const sentence of sentences) {
+      const lowerSentence = sentence.toLowerCase();
+      const score = questionWords.filter(w => lowerSentence.includes(w)).length;
+      if (score > bestScore) {
+        bestScore = score;
+        bestSentence = sentence.trim();
+      }
+    }
+
+    if (bestSentence && bestScore > 0) {
+      answer = bestSentence + ".\n";
+    }
+  }
+
+  // Fallback
+  if (!answer) {
+    // Return first meaningful paragraph
+    const paragraphs = combinedContent.split(/\n\n+/).filter(p => p.trim().length > 50);
+    answer = paragraphs.length > 0 ? paragraphs[0].trim() + "\n" : "Could not extract a specific answer from the content.";
+  }
+
+  // Add sources
+  const sources = sourceUrls.map((url, i) => `Source ${i + 1}: ${url}`).join("\n");
+  return `Answer: ${answer}\n\n${sources}`;
 }
 
 function formatSearchResults(query: string, results: any[]): string {
