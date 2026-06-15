@@ -4,6 +4,7 @@ import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
+import { pathToFileURL } from "node:url";
 import { chromium, Browser, BrowserContext } from "playwright";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
@@ -72,7 +73,7 @@ function getEnvBool(key: string, defaultVal: boolean): boolean {
 
 // --- Server Implementation ---
 
-class WebSearchServer {
+export class WebSearchServer {
   private server: Server;
   private browser: Browser | null = null;
   private browserContext: BrowserContext | null = null;
@@ -427,6 +428,29 @@ class WebSearchServer {
       }
     }
 
+    // HTTP-first: try plain fetch before spinning up Playwright
+    if (!process.env.FORCE_PLAYWRIGHT) {
+      const httpResult = await this.fetchViaHttp(url);
+      if (httpResult) {
+        const dom = new JSDOM(httpResult.html, { url });
+        const reader = new Readability(dom.window.document);
+        const article = reader.parse();
+        if (article?.content && article.content.length > 200) {
+          const markdown = this.turndown.turndown(article.content);
+          const truncatedMarkdown = this.truncateContent(markdown);
+          const title = article.title || "Untitled Page";
+          const fullText = `# ${title}\n\n${truncatedMarkdown}`;
+          let intent: SearchIntent | undefined;
+          if (this.enableCrosslingual) {
+            intent = await this.cache.detectIntent(title + " " + truncatedMarkdown.slice(0, 200));
+          }
+          await this.cache.setCachedContent(url, fullText, title, intent);
+          return { content: [{ type: "text", text: fullText }] };
+        }
+      }
+    }
+    // Fall through to Playwright for JS-rendered pages
+
     // 2. Fetch Fresh Content
     const context = await this.getBrowserContext();
     const page = await context.newPage();
@@ -510,6 +534,39 @@ class WebSearchServer {
       : markdown;
   }
 
+  private async fetchViaHttp(url: string): Promise<{ html: string; buffer: Buffer } | null> {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+          "Accept-Language": "en-US,en;q=0.9",
+        },
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) {
+        return null;
+      }
+      const buffer = Buffer.from(await response.arrayBuffer());
+      if (buffer.length < 500) return null;
+
+      let html = buffer.toString("utf-8");
+      // charset detection (same logic as Playwright path)
+      const head = buffer.subarray(0, 2048).toString("ascii");
+      const charsetMatch = head.match(/<meta[^>]+charset=["']?\s*([a-zA-Z0-9-]+)/i);
+      if (charsetMatch) {
+        const detectedCharset = charsetMatch[1].toLowerCase();
+        if (detectedCharset !== "utf-8" && !detectedCharset.includes("utf")) {
+          const iconvModule = await import("iconv-lite");
+          html = iconvModule.default.decode(buffer, detectedCharset);
+        }
+      }
+      return { html, buffer };
+    } catch {
+      return null;
+    }
+  }
+
   private async fetchPageContent(url: string): Promise<PageCacheEntry | null> {
     // Check in-memory cache first
     const cached = this.pageCache.get(url);
@@ -519,6 +576,24 @@ class WebSearchServer {
     }
 
     try {
+      // HTTP-first attempt
+      if (!process.env.FORCE_PLAYWRIGHT) {
+        const httpResult = await this.fetchViaHttp(url);
+        if (httpResult) {
+          const dom = new JSDOM(httpResult.html, { url });
+          const reader = new Readability(dom.window.document);
+          const article = reader.parse();
+          if (article?.content && article.content.length > 200) {
+            const markdown = this.turndown.turndown(article.content);
+            const truncatedMarkdown = this.truncateContent(markdown);
+            const result: PageCacheEntry = { url, title: article.title || "Untitled", content: truncatedMarkdown };
+            this.pageCache.set(url, result);
+            return result;
+          }
+        }
+      }
+      // Fall through to Playwright
+
       const context = await this.getBrowserContext();
       const page = await context.newPage();
       try {
@@ -691,5 +766,7 @@ function formatSearchResults(query: string, results: SearchResultItem[]): string
   return summary + formatted;
 }
 
-const server = new WebSearchServer();
-server.run().catch(console.error);
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+  const server = new WebSearchServer();
+  server.run().catch(console.error);
+}
