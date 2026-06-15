@@ -20,11 +20,10 @@ import { CrossLingualEngine } from "./cache/crosslingual.js";
 import type { SearchResultItem } from "./cache/types.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 import { SearchIntent } from "./cache/intent.js";
+import type { SearchProvider } from "./providers/base.js";
+import { ProviderHealthTracker } from "./providers/health.js";
+import { buildProviders } from "./providers/registry.js";
 import {
-  parseBingResults,
-  parseBraveResults,
-  parseDuckDuckGoResults,
-  parseGoogleResults,
   resolveSearchLocale,
   type SearchLocale,
 } from "./search-utils.js";
@@ -39,14 +38,6 @@ const FetchSchema = z.object({
   url: z.string().url().describe("The URL of the webpage to fetch and convert to markdown"),
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
 });
-
-// --- Search Provider Types ---
-
-type SearchProvider = {
-  name: string;
-  priority: number;
-  execute: (query: string, locale: SearchLocale) => Promise<SearchResultItem[]>;
-};
 
 type PageCacheEntry = {
   url: string;
@@ -83,6 +74,7 @@ export class WebSearchServer {
   private searchLimiter: TokenBucket;
   private fetchLimiter: TokenBucket;
   private providers: SearchProvider[] = [];
+  private healthTracker = new ProviderHealthTracker();
   private enableCrosslingual: boolean;
   private fetchWaitUntil: "domcontentloaded" | "networkidle";
   private pageCache: LRUCache<string, PageCacheEntry>;
@@ -133,104 +125,7 @@ export class WebSearchServer {
 
   private setupProviders() {
     const order = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing");
-
-    const registry: Record<string, (query: string, locale: SearchLocale) => Promise<any[]>> = {
-      duckduckgo: (q, locale) => this.searchDDG(q, locale),
-      bing: (q, locale) => this.searchBing(q, locale),
-      brave: (q, locale) => this.searchBrave(q, locale),
-      google: (q, locale) => this.searchGoogle(q, locale),
-    };
-
-    this.providers = [];
-    for (const name of order) {
-      if (registry[name]) {
-        this.providers.push({ name, priority: this.providers.length, execute: registry[name] });
-        console.error(`Search provider registered: ${name}`);
-      } else {
-        console.error(`Unknown search provider in SEARCH_PROVIDERS: ${name}`);
-      }
-    }
-
-    if (this.providers.length === 0) {
-      console.error("No valid search providers configured. Defaulting to duckduckgo.");
-      this.providers.push({ name: "duckduckgo", priority: 0, execute: (q, locale) => this.searchDDG(q, locale) });
-    }
-  }
-
-  // --- DuckDuckGo Lite Search ---
-
-  private async searchDDG(query: string, locale: SearchLocale): Promise<any[]> {
-    const url = `https://lite.duckduckgo.com/lite/?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html",
-        "Accept-Language": locale.acceptLanguage,
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!response.ok) return [];
-
-    const html = await response.text();
-    return parseDuckDuckGoResults(html);
-  }
-
-  // --- Bing Search (Fallback) ---
-
-  private async searchBing(query: string, locale: SearchLocale): Promise<any[]> {
-    const url = `https://www.bing.com/search?q=${encodeURIComponent(query)}&mkt=${encodeURIComponent(locale.market)}`;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": locale.acceptLanguage,
-      },
-      signal: AbortSignal.timeout(15000),
-    });
-
-    if (!response.ok) return [];
-
-    const html = await response.text();
-    return parseBingResults(html);
-  }
-
-  // --- Brave Search (Fallback) ---
-
-  private async searchBrave(query: string, locale: SearchLocale): Promise<any[]> {
-    const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": locale.acceptLanguage,
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!response.ok) return [];
-
-    const html = await response.text();
-    return parseBraveResults(html);
-  }
-
-  // --- Google Search (Fallback) ---
-
-  private async searchGoogle(query: string, locale: SearchLocale): Promise<any[]> {
-    const url = `https://www.google.com/search?q=${encodeURIComponent(query)}&udm=14`;
-    const response = await fetch(url, {
-      headers: {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": locale.acceptLanguage,
-      },
-      signal: AbortSignal.timeout(10000),
-    });
-
-    if (!response.ok) return [];
-
-    const html = await response.text();
-    return parseGoogleResults(html);
+    this.providers = buildProviders(order);
   }
 
   private async getBrowser() {
@@ -381,14 +276,22 @@ export class WebSearchServer {
 
   private async executeProviderSearch(query: string, locale: SearchLocale): Promise<SearchResultItem[]> {
     for (const provider of this.providers) {
+      if (!this.healthTracker.isAvailable(provider.name)) {
+        console.error(`Skipping provider ${provider.name}: provider is in backoff window`);
+        continue;
+      }
+
       try {
         const results = await provider.execute(query, locale);
         if (results.length > 0) {
+          this.healthTracker.record(provider.name, true);
           console.error(`Provider ${provider.name} returned ${results.length} results`);
           return results;
         }
+        this.healthTracker.record(provider.name, false);
         console.error(`Provider ${provider.name} returned 0 parsed results`);
       } catch (e) {
+        this.healthTracker.record(provider.name, false);
         console.error(`Provider ${provider.name} error:`, e instanceof Error ? e.message : String(e));
       }
     }
