@@ -17,6 +17,7 @@ import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
 import { CrossLingualEngine } from "./cache/crosslingual.js";
+import { OllamaClient } from "./llm/ollama.js";
 import type { SearchResultItem } from "./cache/types.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 import { SearchIntent } from "./cache/intent.js";
@@ -78,7 +79,9 @@ export class WebSearchServer {
   private enableCrosslingual: boolean;
   private fetchWaitUntil: "domcontentloaded" | "networkidle";
   private pageCache: LRUCache<string, PageCacheEntry>;
+  private ollamaClient: OllamaClient | null = null;
   private readonly MAX_CONTENT_CHARS = 50_000;
+  private readonly startedAt = Date.now();
 
   constructor() {
     this.server = new Server(
@@ -110,6 +113,19 @@ export class WebSearchServer {
       max: 100,
       ttl: 10 * 60 * 1000,
     });
+
+    if (getEnvBool("ENABLE_OLLAMA", false)) {
+      this.ollamaClient = new OllamaClient(
+        getEnv("OLLAMA_URL", "http://localhost:11434"),
+        getEnv("OLLAMA_MODEL", "llama3.2")
+      );
+      console.error(
+        "Ollama integration enabled: " +
+          getEnv("OLLAMA_URL", "http://localhost:11434") +
+          " model=" +
+          getEnv("OLLAMA_MODEL", "llama3.2")
+      );
+    }
 
     if (this.enableCrosslingual) {
       this.crossLingual = new CrossLingualEngine();
@@ -193,6 +209,15 @@ export class WebSearchServer {
             required: ["url"],
           },
         },
+        {
+          name: "server_status",
+          description: "Returns the current status of the MCP server: active search providers, cache statistics, model load state, and uptime. Use this to check if the server is healthy before issuing search requests.",
+          inputSchema: {
+            type: "object",
+            properties: {},
+            required: [],
+          },
+        },
       ],
     }));
 
@@ -204,6 +229,8 @@ export class WebSearchServer {
           return await this.handleSearch(args);
         } else if (name === "fetch_content") {
           return await this.handleFetch(args);
+        } else if (name === "server_status") {
+          return await this.handleStatus();
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -262,7 +289,19 @@ export class WebSearchServer {
 
     if (validPages.length > 0) {
       const combinedContent = validPages.map((page) => `# ${page.title}\n${page.content}`).join("\n\n---\n\n");
-      const answer = extractAnswerFromContent(query, combinedContent, validPages.map((page) => page.url));
+      const sourceUrls = validPages.map((page) => page.url);
+      let answer: string;
+      if (this.ollamaClient) {
+        const ollamaAnswer = await this.ollamaClient.summarize(combinedContent, query);
+        if (ollamaAnswer) {
+          const sources = sourceUrls.map((url, i) => `Source ${i + 1}: ${url}`).join("\n");
+          answer = `Answer: ${ollamaAnswer}\n\n${sources}`;
+        } else {
+          answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
+        }
+      } else {
+        answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
+      }
       return {
         content: [{ type: "text", text: answer }],
       };
@@ -429,6 +468,24 @@ export class WebSearchServer {
         console.error("Error closing page:", e);
       }
     }
+  }
+
+  private async handleStatus() {
+    const cacheStats = this.cache.getCacheStats();
+    const status = {
+      providers: this.providers.map((provider) => ({
+        name: provider.name,
+        available: this.healthTracker.isAvailable(provider.name),
+      })),
+      cache: cacheStats,
+      browser: this.browser ? "running" : "idle",
+      crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
+      ollama: this.ollamaClient ? "enabled" : "disabled",
+      uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
+    };
+    return {
+      content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
+    };
   }
 
   private truncateContent(markdown: string): string {

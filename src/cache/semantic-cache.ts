@@ -95,6 +95,10 @@ export class SemanticCache {
     }
   }
 
+  getCacheStats(): { contentCount: number; vectorCount: number } {
+    return this.vectorStore.getStats();
+  }
+
   // --- Full Content Cache with TTL ---
 
   private intentToContentCategory(intent: SearchIntent): string {

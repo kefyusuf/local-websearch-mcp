@@ -142,6 +142,17 @@ export class SQLiteVectorStore implements IVectorStore {
     }
   }
 
+  getStats(): { contentCount: number; vectorCount: number } {
+    const contentCount = (this.db.prepare("SELECT COUNT(*) as count FROM content_cache").get() as { count: number }).count;
+    let vectorCount = 0;
+    if (this.isVecEnabled) {
+      vectorCount = (this.db.prepare("SELECT COUNT(*) as count FROM semantic_cache_metadata").get() as { count: number }).count;
+    } else {
+      vectorCount = (this.db.prepare("SELECT COUNT(*) as count FROM vector_cache_fallback").get() as { count: number }).count;
+    }
+    return { contentCount, vectorCount };
+  }
+
   async getContent(url: string): Promise<ContentEntry | null> {
     const row = this.db.prepare("SELECT * FROM content_cache WHERE url = ?").get(url) as ContentEntry | undefined;
     return row || null;

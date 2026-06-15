@@ -36,6 +36,7 @@ export interface IVectorStore {
   add(id: string, vector: number[], metadata: CacheMetadata): Promise<void>;
   search(vector: number[], limit: number): Promise<VectorMatch[]>;
   clear(): Promise<void>;
+  getStats(): { contentCount: number; vectorCount: number };
   close(): void;
   
   // Content Cache Methods
