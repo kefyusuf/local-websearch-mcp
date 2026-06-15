@@ -7,6 +7,7 @@ import {
 import { chromium, Browser, BrowserContext } from "playwright";
 import { Readability } from "@mozilla/readability";
 import { JSDOM } from "jsdom";
+import { LRUCache } from "lru-cache";
 import TurndownService from "turndown";
 import { z } from "zod";
 import iconv from "iconv-lite";
@@ -15,6 +16,7 @@ import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
 import { CrossLingualEngine } from "./cache/crosslingual.js";
+import type { SearchResultItem } from "./cache/types.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 import { SearchIntent } from "./cache/intent.js";
 import {
@@ -37,16 +39,18 @@ const FetchSchema = z.object({
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
 });
 
-const AnswerSchema = z.object({
-  question: z.string().min(1).describe("The question to answer (e.g. 'what is the latest Laravel version?')"),
-});
-
 // --- Search Provider Types ---
 
 type SearchProvider = {
   name: string;
   priority: number;
-  execute: (query: string, locale: SearchLocale) => Promise<any[]>;
+  execute: (query: string, locale: SearchLocale) => Promise<SearchResultItem[]>;
+};
+
+type PageCacheEntry = {
+  url: string;
+  title: string;
+  content: string;
 };
 
 // --- Env Configuration ---
@@ -80,8 +84,8 @@ class WebSearchServer {
   private providers: SearchProvider[] = [];
   private enableCrosslingual: boolean;
   private fetchWaitUntil: "domcontentloaded" | "networkidle";
-  private pageCache = new Map<string, { url: string; title: string; content: string; timestamp: number }>();
-  private readonly PAGE_CACHE_TTL = 10 * 60 * 1000; // 10 minutes
+  private pageCache: LRUCache<string, PageCacheEntry>;
+  private readonly MAX_CONTENT_CHARS = 50_000;
 
   constructor() {
     this.server = new Server(
@@ -109,9 +113,10 @@ class WebSearchServer {
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore(getEnv("CACHE_DB_PATH", "websearch_cache.db"));
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
-
-    // Clear any stale cached results from previous runs
-    this.cache.clearSearchCache().catch(() => {});
+    this.pageCache = new LRUCache({
+      max: 100,
+      ttl: 10 * 60 * 1000,
+    });
 
     if (this.enableCrosslingual) {
       this.crossLingual = new CrossLingualEngine();
@@ -271,7 +276,7 @@ class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return top results re-ranked by relevance. Supports multiple search engines with automatic fallback.",
+          description: "Search the web and return top results with an extracted answer. Use for factual questions, current versions, prices, or any live information.",
           inputSchema: {
             type: "object",
             properties: {
@@ -292,17 +297,6 @@ class WebSearchServer {
             required: ["url"],
           },
         },
-        {
-          name: "get_answer",
-          description: "Answer a factual question by searching the web and extracting the answer from live content. Use this for questions about versions, prices, dates, or any current information.",
-          inputSchema: {
-            type: "object",
-            properties: {
-              question: { type: "string" },
-            },
-            required: ["question"],
-          },
-        },
       ],
     }));
 
@@ -314,8 +308,6 @@ class WebSearchServer {
           return await this.handleSearch(args);
         } else if (name === "fetch_content") {
           return await this.handleFetch(args);
-        } else if (name === "get_answer") {
-          return await this.handleAnswer(args);
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -345,6 +337,12 @@ class WebSearchServer {
     const queryLocale = resolveSearchLocale(query, this.crossLingual
       ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
       : "eng_Latn");
+    const cached = await this.cache.get(query);
+
+    if (cached !== null && cached.length > 0) {
+      console.error(`Semantic cache hit for query: ${query}`);
+      return this.buildSearchResponse(query, cached);
+    }
 
     // Search across configured providers
     const results = await this.executeProviderSearch(query, queryLocale);
@@ -357,27 +355,30 @@ class WebSearchServer {
       };
     }
 
-    // Fetch top 2 results and extract answer
-    const urls = results.slice(0, 2).map(r => r.url).filter(Boolean);
-    const pages = await Promise.all(urls.map(url => this.fetchPageContent(url)));
-    const validPages = pages.filter(p => p !== null) as { url: string; title: string; content: string }[];
+    await this.cache.set(query, results);
+    return this.buildSearchResponse(query, results);
+  }
+
+  private async buildSearchResponse(query: string, results: SearchResultItem[]) {
+    const urls = results.slice(0, 2).map((result) => result.url).filter(Boolean);
+    const pages = await Promise.all(urls.map((url) => this.fetchPageContent(url)));
+    const validPages = pages.filter((page): page is PageCacheEntry => page !== null);
 
     if (validPages.length > 0) {
-      const combinedContent = validPages.map(p => `# ${p.title}\n${p.content}`).join("\n\n---\n\n");
-      const answer = extractAnswerFromContent(query, combinedContent, validPages.map(p => p.url));
+      const combinedContent = validPages.map((page) => `# ${page.title}\n${page.content}`).join("\n\n---\n\n");
+      const answer = extractAnswerFromContent(query, combinedContent, validPages.map((page) => page.url));
       return {
         content: [{ type: "text", text: answer }],
       };
     }
 
-    // Fallback: return ranked results
     const rankedResults = await this.cache.reRankResults(query, results);
     return {
       content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
     };
   }
 
-  private async executeProviderSearch(query: string, locale: SearchLocale): Promise<any[]> {
+  private async executeProviderSearch(query: string, locale: SearchLocale): Promise<SearchResultItem[]> {
     for (const provider of this.providers) {
       try {
         const results = await provider.execute(query, locale);
@@ -478,13 +479,14 @@ class WebSearchServer {
       }
 
       const markdown = this.turndown.turndown(article.content);
+      const truncatedMarkdown = this.truncateContent(markdown);
       const title = article.title || "Untitled Page";
-      const fullText = `# ${title}\n\n${markdown}`;
+      const fullText = `# ${title}\n\n${truncatedMarkdown}`;
 
       // Detect intent for TTL-based caching
       let intent: SearchIntent | undefined;
       if (this.enableCrosslingual) {
-        intent = await this.cache.detectIntent(title + " " + markdown.slice(0, 200));
+        intent = await this.cache.detectIntent(title + " " + truncatedMarkdown.slice(0, 200));
       }
 
       // Save to Content Cache with intent-based TTL
@@ -502,17 +504,18 @@ class WebSearchServer {
     }
   }
 
-  private async handleAnswer(args: unknown) {
-    const { question } = AnswerSchema.parse(args);
-    return this.handleSearch({ query: question });
+  private truncateContent(markdown: string): string {
+    return markdown.length > this.MAX_CONTENT_CHARS
+      ? `${markdown.slice(0, this.MAX_CONTENT_CHARS)}\n\n_[Content truncated at 50,000 characters]_`
+      : markdown;
   }
 
-  private async fetchPageContent(url: string): Promise<{ url: string; title: string; content: string } | null> {
+  private async fetchPageContent(url: string): Promise<PageCacheEntry | null> {
     // Check in-memory cache first
     const cached = this.pageCache.get(url);
-    if (cached && Date.now() - cached.timestamp < this.PAGE_CACHE_TTL) {
+    if (cached) {
       console.error(`Page cache hit: ${url}`);
-      return { url: cached.url, title: cached.title, content: cached.content };
+      return cached;
     }
 
     try {
@@ -539,8 +542,9 @@ class WebSearchServer {
         if (!article || !article.content) return null;
 
         const markdown = this.turndown.turndown(article.content);
-        const result = { url, title: article.title || "Untitled", content: markdown };
-        this.pageCache.set(url, { ...result, timestamp: Date.now() });
+        const truncatedMarkdown = this.truncateContent(markdown);
+        const result = { url, title: article.title || "Untitled", content: truncatedMarkdown };
+        this.pageCache.set(url, result);
         return result;
       } finally {
         await page.close().catch(() => {});
@@ -649,13 +653,7 @@ function extractAnswerFromContent(question: string, combinedContent: string, sou
   return `Answer: ${answer}\n\n${sources}`;
 }
 
-function formatSearchResults(query: string, results: any[]): string {
-  // Extract version info from results (e.g. "Laravel 13", "v3.2.1")
-  const versionPattern = /(\d+\.\d+(?:\.\d+)?)/g;
-  const labeledPatterns = [
-    { label: null, re: /(?:^|\s)(\d+)\.(\d+)(?:\.(\d+))?/g },
-  ];
-
+function formatSearchResults(query: string, results: SearchResultItem[]): string {
   const foundVersions: { label: string; major: number; minor: number; patch: number }[] = [];
 
   for (const r of results) {

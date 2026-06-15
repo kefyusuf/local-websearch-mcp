@@ -82,7 +82,8 @@ export class CrossLingualEngine {
 
   shouldCrossSearch(intent: string, lang: string): boolean {
     const isEnglish = lang?.startsWith("eng_");
-    return intent === "technical" && !isEnglish;
+    if (isEnglish) return false;
+    return intent === "technical" || intent === "general";
   }
 
   async translateToEnglish(text: string, lang: string): Promise<string> {

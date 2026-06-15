@@ -14,14 +14,13 @@ describe("CrossLingualEngine", () => {
     expect(engine.shouldCrossSearch("technical", "deu_Latn")).toBe(true);
   });
 
-  it("should not trigger cross-search for non-technical non-English queries", () => {
+  it("should trigger cross-search for general non-English queries", () => {
     const engine = new CrossLingualEngine();
-    expect(engine.shouldCrossSearch("news", "tur_Latn")).toBe(false);
-    expect(engine.shouldCrossSearch("general", "tur_Latn")).toBe(false);
+    expect(engine.shouldCrossSearch("general", "tur_Latn")).toBe(true);
   });
 
-  it("should not trigger cross-search for general intent", () => {
+  it("should not trigger cross-search for news intent", () => {
     const engine = new CrossLingualEngine();
-    expect(engine.shouldCrossSearch("general", "tur_Latn")).toBe(false);
+    expect(engine.shouldCrossSearch("news", "tur_Latn")).toBe(false);
   });
 });

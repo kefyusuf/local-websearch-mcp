@@ -34,6 +34,6 @@ export class TransformersEmbeddingProvider implements IEmbeddingProvider {
   }
 
   isAvailable(): boolean {
-    return !this.extractorFailed && this.extractor !== null;
+    return !this.extractorFailed;
   }
 }

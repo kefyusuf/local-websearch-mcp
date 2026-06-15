@@ -1,25 +1,17 @@
 import { describe, it, expect, beforeEach, afterEach } from "vitest";
 import { SQLiteVectorStore } from "../cache/sqlite-store.js";
-import fs from "node:fs";
-
-const TEST_DB = "test_store.db";
+const TEST_DB = ":memory:";
 
 describe("SQLiteVectorStore", () => {
   let store: SQLiteVectorStore | null = null;
 
   beforeEach(() => {
     if (store) { store.close(); store = null; }
-    if (fs.existsSync(TEST_DB)) {
-      try { fs.unlinkSync(TEST_DB); } catch {}
-    }
     store = new SQLiteVectorStore(TEST_DB);
   });
 
   afterEach(() => {
     if (store) { store.close(); store = null; }
-    if (fs.existsSync(TEST_DB)) {
-      try { fs.unlinkSync(TEST_DB); } catch {}
-    }
   });
 
   it("should store and retrieve vectors", async () => {

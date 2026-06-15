@@ -76,4 +76,22 @@ describe("SemanticCache", () => {
     const ranked = await cache.reRankResults("MCP protocol", raw);
     expect(ranked[0].title).toBe("MCP Guide");
   });
+
+  it("should bootstrap embeddings even when provider reports unavailable before first call", async () => {
+    const lazyProvider: IEmbeddingProvider = {
+      getEmbedding: vi.fn(async (text: string) => {
+        if (text === "gold price") return makeVec([1, 0]);
+        if (text === "Gold live market rate") return makeVec([0.95, 0.2]);
+        return makeVec([0, 1]);
+      }),
+      isAvailable: vi.fn(() => false),
+    };
+    cache = new SemanticCache(lazyProvider, store, 0.7);
+
+    await cache.set("gold price", [{ title: "Gold", url: "https://example.com/gold", snippet: "live market rate", source: "test" }]);
+    const hit = await cache.get("gold price");
+
+    expect(hit).not.toBeNull();
+    expect(lazyProvider.getEmbedding).toHaveBeenCalled();
+  });
 });

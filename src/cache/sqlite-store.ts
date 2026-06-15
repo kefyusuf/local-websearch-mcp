@@ -9,6 +9,9 @@ export class SQLiteVectorStore implements IVectorStore {
 
   constructor(dbPath: string = "cache.db") {
     this.db = new Database(dbPath);
+    // Cache data is reconstructable; keep SQLite journals in memory to avoid delete I/O failures on restricted filesystems.
+    this.db.pragma("journal_mode = MEMORY");
+    this.db.pragma("temp_store = MEMORY");
     this.tryEnableVec();
     this.init();
   }
@@ -36,20 +39,28 @@ export class SQLiteVectorStore implements IVectorStore {
     `);
 
     if (this.isVecEnabled) {
-      // High-performance vector table
-      this.db.exec(`
-        CREATE VIRTUAL TABLE IF NOT EXISTS semantic_cache_vec USING vec0(
-          id TEXT PRIMARY KEY,
-          embedding float[384]
-        );
-        
-        CREATE TABLE IF NOT EXISTS semantic_cache_metadata (
-          id TEXT PRIMARY KEY,
-          metadata TEXT NOT NULL,
-          timestamp INTEGER NOT NULL
-        );
-      `);
-    } else {
+      try {
+        // High-performance vector table
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS semantic_cache_vec USING vec0(
+            id TEXT PRIMARY KEY,
+            embedding float[384]
+          );
+          
+          CREATE TABLE IF NOT EXISTS semantic_cache_metadata (
+            id TEXT PRIMARY KEY,
+            metadata TEXT NOT NULL,
+            timestamp INTEGER NOT NULL
+          );
+        `);
+        return;
+      } catch (error) {
+        console.error("Failed to initialize sqlite-vec tables, falling back to JS-based search:", error);
+        this.isVecEnabled = false;
+      }
+    }
+
+    if (!this.isVecEnabled) {
       // Fallback JS-based table
       this.db.exec(`
         CREATE TABLE IF NOT EXISTS vector_cache_fallback (
@@ -59,6 +70,8 @@ export class SQLiteVectorStore implements IVectorStore {
           timestamp INTEGER NOT NULL
         );
       `);
+    } else {
+      return;
     }
   }
 
