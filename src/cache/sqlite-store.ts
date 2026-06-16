@@ -165,6 +165,12 @@ export class SQLiteVectorStore implements IVectorStore {
     stmt.run(url, content, category, Date.now());
   }
 
+  deleteExpiredContent(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    const result = this.db.prepare("DELETE FROM content_cache WHERE timestamp < ?").run(cutoff);
+    return result.changes;
+  }
+
   close() {
     this.db.close();
   }

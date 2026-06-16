@@ -42,6 +42,7 @@ export interface IVectorStore {
   // Content Cache Methods
   getContent(url: string): Promise<ContentEntry | null>;
   setContent(url: string, content: string, category: string): Promise<void>;
+  deleteExpiredContent(maxAgeMs: number): number;
 }
 
 export interface ContentEntry {

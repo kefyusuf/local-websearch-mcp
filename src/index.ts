@@ -12,6 +12,7 @@ import { LRUCache } from "lru-cache";
 import TurndownService from "turndown";
 import { z } from "zod";
 import iconv from "iconv-lite";
+import { extractAnswerFromContent, formatSearchResults } from "./answer-extraction.js";
 import { isPrivateHost } from "./ssrf.js";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
@@ -113,6 +114,12 @@ export class WebSearchServer {
       max: 100,
       ttl: 10 * 60 * 1000,
     });
+    const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
+    const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
+    setInterval(() => {
+      const deleted = this.cache.deleteExpiredContent();
+      if (deleted > 0) console.error(`Cache cleanup: removed ${deleted} expired content entries`);
+    }, cleanupIntervalMs).unref();
 
     if (getEnvBool("ENABLE_OLLAMA", false)) {
       this.ollamaClient = new OllamaClient(
@@ -271,9 +278,8 @@ export class WebSearchServer {
     const results = await this.executeProviderSearch(query, queryLocale);
 
     if (results.length === 0) {
-      const configured = getEnvArray("SEARCH_PROVIDERS", "duckduckgo,bing,brave,google");
       return {
-        content: [{ type: "text", text: `Search failed: all configured providers returned no results. Tried: ${configured.join(", ")}. Check network connectivity or SEARCH_PROVIDERS env.` }],
+        content: [{ type: "text", text: "Web search is currently unavailable (all providers returned no results). Try using fetch_content with a direct URL instead, or retry the search later." }],
         isError: true,
       };
     }
@@ -323,9 +329,23 @@ export class WebSearchServer {
       try {
         const results = await provider.execute(query, locale);
         if (results.length > 0) {
+          const seen = new Set<string>();
+          const deduped = results.filter((result) => {
+            if (!result.url || seen.has(result.url)) return false;
+            seen.add(result.url);
+            return true;
+          });
+          if (deduped.length < results.length) {
+            console.error(`Deduplicated ${results.length - deduped.length} duplicate URLs from ${provider.name}`);
+          }
+          if (deduped.length === 0) {
+            this.healthTracker.record(provider.name, false);
+            console.error(`Provider ${provider.name} returned 0 parsed results after deduplication`);
+            continue;
+          }
           this.healthTracker.record(provider.name, true);
-          console.error(`Provider ${provider.name} returned ${results.length} results`);
-          return results;
+          console.error(`Provider ${provider.name} returned ${deduped.length} results`);
+          return deduped;
         }
         this.healthTracker.record(provider.name, false);
         console.error(`Provider ${provider.name} returned 0 parsed results`);
@@ -374,19 +394,14 @@ export class WebSearchServer {
     if (!process.env.FORCE_PLAYWRIGHT) {
       const httpResult = await this.fetchViaHttp(url);
       if (httpResult) {
-        const dom = new JSDOM(httpResult.html, { url });
-        const reader = new Readability(dom.window.document);
-        const article = reader.parse();
-        if (article?.content && article.content.length > 200) {
-          const markdown = this.turndown.turndown(article.content);
-          const truncatedMarkdown = this.truncateContent(markdown);
-          const title = article.title || "Untitled Page";
-          const fullText = `# ${title}\n\n${truncatedMarkdown}`;
+        const parsedArticle = this.parseHtmlToMarkdown(httpResult.html, url);
+        if (parsedArticle) {
+          const fullText = `# ${parsedArticle.title}\n\n${parsedArticle.markdown}`;
           let intent: SearchIntent | undefined;
           if (this.enableCrosslingual) {
-            intent = await this.cache.detectIntent(title + " " + truncatedMarkdown.slice(0, 200));
+            intent = await this.cache.detectIntent(parsedArticle.title + " " + parsedArticle.markdown.slice(0, 200));
           }
-          await this.cache.setCachedContent(url, fullText, title, intent);
+          await this.cache.setCachedContent(url, fullText, parsedArticle.title, intent);
           return { content: [{ type: "text", text: fullText }] };
         }
       }
@@ -433,30 +448,23 @@ export class WebSearchServer {
         }
       }
 
-      const dom = new JSDOM(html, { url });
-      const reader = new Readability(dom.window.document);
-      const article = reader.parse();
-
-      if (!article || !article.content) {
+      const parsedArticle = this.parseHtmlToMarkdown(html, url);
+      if (!parsedArticle) {
         return {
           content: [{ type: "text", text: "Could not parse article content from the page." }],
           isError: true,
         };
       }
-
-      const markdown = this.turndown.turndown(article.content);
-      const truncatedMarkdown = this.truncateContent(markdown);
-      const title = article.title || "Untitled Page";
-      const fullText = `# ${title}\n\n${truncatedMarkdown}`;
+      const fullText = `# ${parsedArticle.title}\n\n${parsedArticle.markdown}`;
 
       // Detect intent for TTL-based caching
       let intent: SearchIntent | undefined;
       if (this.enableCrosslingual) {
-        intent = await this.cache.detectIntent(title + " " + truncatedMarkdown.slice(0, 200));
+        intent = await this.cache.detectIntent(parsedArticle.title + " " + parsedArticle.markdown.slice(0, 200));
       }
 
       // Save to Content Cache with intent-based TTL
-      await this.cache.setCachedContent(url, fullText, title, intent);
+      await this.cache.setCachedContent(url, fullText, parsedArticle.title, intent);
 
       return {
         content: [{ type: "text", text: fullText }],
@@ -492,6 +500,15 @@ export class WebSearchServer {
     return markdown.length > this.MAX_CONTENT_CHARS
       ? `${markdown.slice(0, this.MAX_CONTENT_CHARS)}\n\n_[Content truncated at 50,000 characters]_`
       : markdown;
+  }
+
+  private parseHtmlToMarkdown(html: string, url: string): { title: string; markdown: string } | null {
+    const dom = new JSDOM(html, { url });
+    const reader = new Readability(dom.window.document);
+    const article = reader.parse();
+    if (!article?.content || article.content.length <= 200) return null;
+    const markdown = this.turndown.turndown(article.content);
+    return { title: article.title || "Untitled Page", markdown: this.truncateContent(markdown) };
   }
 
   private async fetchViaHttp(url: string): Promise<{ html: string; buffer: Buffer } | null> {
@@ -540,13 +557,9 @@ export class WebSearchServer {
       if (!process.env.FORCE_PLAYWRIGHT) {
         const httpResult = await this.fetchViaHttp(url);
         if (httpResult) {
-          const dom = new JSDOM(httpResult.html, { url });
-          const reader = new Readability(dom.window.document);
-          const article = reader.parse();
-          if (article?.content && article.content.length > 200) {
-            const markdown = this.turndown.turndown(article.content);
-            const truncatedMarkdown = this.truncateContent(markdown);
-            const result: PageCacheEntry = { url, title: article.title || "Untitled", content: truncatedMarkdown };
+          const parsedArticle = this.parseHtmlToMarkdown(httpResult.html, url);
+          if (parsedArticle) {
+            const result: PageCacheEntry = { url, title: parsedArticle.title, content: parsedArticle.markdown };
             this.pageCache.set(url, result);
             return result;
           }
@@ -571,14 +584,10 @@ export class WebSearchServer {
           }
         }
 
-        const dom = new JSDOM(html, { url });
-        const reader = new Readability(dom.window.document);
-        const article = reader.parse();
-        if (!article || !article.content) return null;
+        const parsedArticle = this.parseHtmlToMarkdown(html, url);
+        if (!parsedArticle) return null;
 
-        const markdown = this.turndown.turndown(article.content);
-        const truncatedMarkdown = this.truncateContent(markdown);
-        const result = { url, title: article.title || "Untitled", content: truncatedMarkdown };
+        const result = { url, title: parsedArticle.title, content: parsedArticle.markdown };
         this.pageCache.set(url, result);
         return result;
       } finally {
@@ -605,125 +614,6 @@ function citeToUrl(text: string): string {
   } catch {
     return "";
   }
-}
-
-function extractAnswerFromContent(question: string, combinedContent: string, sourceUrls: string[]): string {
-  const lowerContent = combinedContent.toLowerCase();
-  const lowerQuestion = question.toLowerCase();
-  const questionWords = lowerQuestion.split(/\s+/);
-
-  // Extract version numbers from content
-  const versionRegex = /(\w+)\s+(\d+)\.(\d+)(?:\.(\d+))?/g;
-  const versions: { name: string; major: number; minor: number; patch: number; context: string }[] = [];
-  let match: RegExpExecArray | null;
-
-  while ((match = versionRegex.exec(combinedContent)) !== null) {
-    const name = match[1];
-    const major = parseInt(match[2]);
-    const minor = parseInt(match[3]);
-    const patch = match[4] ? parseInt(match[4]) : 0;
-    const start = Math.max(0, match.index - 60);
-    const end = Math.min(combinedContent.length, match.index + match[0].length + 100);
-    const context = combinedContent.slice(start, end).replace(/\n+/g, " ").trim();
-    versions.push({ name, major, minor, patch, context });
-  }
-
-  // Find best answer
-  let answer = "";
-
-  // Strategy 1: Version question with labeled versions
-  if (versions.length > 0) {
-    // Find versions whose name appears in the question
-    const relevantVersions = versions.filter(v => {
-      const nameLower = v.name.toLowerCase();
-      return questionWords.some(w => nameLower.includes(w) || w.includes(nameLower));
-    });
-
-    const candidates = relevantVersions.length > 0 ? relevantVersions : versions;
-
-    const best = candidates.reduce((a, b) =>
-      a.major !== b.major ? (a.major > b.major ? a : b) :
-      a.minor !== b.minor ? (a.minor > b.minor ? a : b) :
-      a.patch > b.patch ? a : b
-    );
-
-    answer = `The latest ${best.name} version is ${best.name} ${best.major}.${best.minor}` +
-      (best.patch > 0 ? `.${best.patch}` : "") + ".\n";
-
-    // Add context from source
-    const contextClean = best.context
-      .replace(best.name, `**${best.name} ${best.major}.${best.minor}**`);
-    answer += `\nContext: ${contextClean}\n`;
-  }
-
-  // Strategy 2: General factual answer - find sentence with most question word matches
-  if (!answer) {
-    const sentences = combinedContent.split(/[.!?]+\s+/);
-    let bestSentence = "";
-    let bestScore = 0;
-
-    for (const sentence of sentences) {
-      const lowerSentence = sentence.toLowerCase();
-      const score = questionWords.filter(w => lowerSentence.includes(w)).length;
-      if (score > bestScore) {
-        bestScore = score;
-        bestSentence = sentence.trim();
-      }
-    }
-
-    if (bestSentence && bestScore > 0) {
-      answer = bestSentence + ".\n";
-    }
-  }
-
-  // Fallback
-  if (!answer) {
-    // Return first meaningful paragraph
-    const paragraphs = combinedContent.split(/\n\n+/).filter(p => p.trim().length > 50);
-    answer = paragraphs.length > 0 ? paragraphs[0].trim() + "\n" : "Could not extract a specific answer from the content.";
-  }
-
-  // Add sources
-  const sources = sourceUrls.map((url, i) => `Source ${i + 1}: ${url}`).join("\n");
-  return `Answer: ${answer}\n\n${sources}`;
-}
-
-function formatSearchResults(query: string, results: SearchResultItem[]): string {
-  const foundVersions: { label: string; major: number; minor: number; patch: number }[] = [];
-
-  for (const r of results) {
-    const text = `${r.title} ${r.snippet}`;
-    let m: RegExpExecArray | null;
-    const re = /(?:^|\s)(\d+)\.(\d+)(?:\.(\d+))?/g;
-    while ((m = re.exec(text)) !== null) {
-      const before = text.slice(Math.max(0, m.index - 20), m.index);
-      const labelMatch = before.match(/(\w+)\s*$/);
-      const label = labelMatch ? labelMatch[1] : "";
-      foundVersions.push({
-        label,
-        major: parseInt(m[1]),
-        minor: parseInt(m[2]),
-        patch: m[3] ? parseInt(m[3]) : 0,
-      });
-    }
-  }
-
-  let summary = "";
-  if (foundVersions.length > 0) {
-    const best = foundVersions.reduce((a, b) =>
-      a.major !== b.major ? (a.major > b.major ? a : b) :
-      a.minor !== b.minor ? (a.minor > b.minor ? a : b) :
-      a.patch > b.patch ? a : b
-    );
-    const labelText = best.label ? `${best.label} ${best.major}.${best.minor}` : `v${best.major}.${best.minor}`;
-    summary = `Answer: The latest version found is ${labelText}.\n\n`;
-  }
-
-  const formatted = results.map((r, i) =>
-    `${i + 1}. "${r.title}" - ${r.url}\n   ${r.snippet || "(no description)"}`
-  ).join("\n\n");
-
-  return summary + formatted;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

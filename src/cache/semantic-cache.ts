@@ -99,6 +99,12 @@ export class SemanticCache {
     return this.vectorStore.getStats();
   }
 
+  deleteExpiredContent(): number {
+    // Use 30 days as the max possible TTL (docs/technical category)
+    const MAX_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+    return this.vectorStore.deleteExpiredContent(MAX_TTL_MS);
+  }
+
   // --- Full Content Cache with TTL ---
 
   private intentToContentCategory(intent: SearchIntent): string {
