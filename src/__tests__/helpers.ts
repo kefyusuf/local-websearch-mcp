@@ -27,6 +27,13 @@ export class InMemoryVectorStore implements IVectorStore {
     this.contentStore.clear();
   }
 
+  getStats(): { contentCount: number; vectorCount: number } {
+    return {
+      contentCount: this.contentStore.size,
+      vectorCount: this.store.size,
+    };
+  }
+
   close(): void {
   }
 
@@ -38,5 +45,19 @@ export class InMemoryVectorStore implements IVectorStore {
 
   async setContent(url: string, content: string, category: string): Promise<void> {
     this.contentStore.set(url, { content, category, timestamp: Date.now() });
+  }
+
+  deleteExpiredContent(maxAgeMs: number): number {
+    const cutoff = Date.now() - maxAgeMs;
+    let deleted = 0;
+
+    for (const [url, entry] of this.contentStore.entries()) {
+      if (entry.timestamp < cutoff) {
+        this.contentStore.delete(url);
+        deleted++;
+      }
+    }
+
+    return deleted;
   }
 }

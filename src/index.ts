@@ -6,12 +6,7 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { pathToFileURL } from "node:url";
 import { chromium, Browser, BrowserContext } from "playwright";
-import { Readability } from "@mozilla/readability";
-import { JSDOM } from "jsdom";
-import { LRUCache } from "lru-cache";
-import TurndownService from "turndown";
 import { z } from "zod";
-import iconv from "iconv-lite";
 import { extractAnswerFromContent, formatSearchResults } from "./answer-extraction.js";
 import { isPrivateHost } from "./ssrf.js";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
@@ -21,7 +16,6 @@ import { CrossLingualEngine } from "./cache/crosslingual.js";
 import { OllamaClient } from "./llm/ollama.js";
 import type { SearchResultItem } from "./cache/types.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
-import { SearchIntent } from "./cache/intent.js";
 import type { SearchProvider } from "./providers/base.js";
 import { ProviderHealthTracker } from "./providers/health.js";
 import { buildProviders } from "./providers/registry.js";
@@ -29,23 +23,20 @@ import {
   resolveSearchLocale,
   type SearchLocale,
 } from "./search-utils.js";
+import { ContentFetcher } from "./fetch-module.js";
 
 // --- Types & Schemas ---
 
-const SearchSchema = z.object({
+export const SearchSchema = z.object({
   query: z.string().min(1).describe("The search query to perform"),
+  deep: z.boolean().optional().describe("If true, fetch the top result pages and extract a direct answer. If false (default), return a ranked list of results quickly without page fetching."),
+  max_results: z.number().int().min(1).max(10).optional().describe("Maximum number of results to return (1-10, default 5)."),
 });
 
 const FetchSchema = z.object({
   url: z.string().url().describe("The URL of the webpage to fetch and convert to markdown"),
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
 });
-
-type PageCacheEntry = {
-  url: string;
-  title: string;
-  content: string;
-};
 
 // --- Env Configuration ---
 
@@ -70,7 +61,6 @@ export class WebSearchServer {
   private server: Server;
   private browser: Browser | null = null;
   private browserContext: BrowserContext | null = null;
-  private turndown: TurndownService;
   private cache: SemanticCache;
   private crossLingual: CrossLingualEngine | null = null;
   private searchLimiter: TokenBucket;
@@ -78,10 +68,8 @@ export class WebSearchServer {
   private providers: SearchProvider[] = [];
   private healthTracker = new ProviderHealthTracker();
   private enableCrosslingual: boolean;
-  private fetchWaitUntil: "domcontentloaded" | "networkidle";
-  private pageCache: LRUCache<string, PageCacheEntry>;
   private ollamaClient: OllamaClient | null = null;
-  private readonly MAX_CONTENT_CHARS = 50_000;
+  private contentFetcher: ContentFetcher;
   private readonly startedAt = Date.now();
 
   constructor() {
@@ -97,23 +85,13 @@ export class WebSearchServer {
       }
     );
 
-    this.turndown = new TurndownService({
-      headingStyle: "atx",
-      codeBlockStyle: "fenced",
-      emDelimiter: "_",
-    });
-
     this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
-    this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
+    const fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
 
     // Initialize Semantic Cache with SQLite for persistence
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore(getEnv("CACHE_DB_PATH", "websearch_cache.db"));
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
-    this.pageCache = new LRUCache({
-      max: 100,
-      ttl: 10 * 60 * 1000,
-    });
     const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
     const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
     setInterval(() => {
@@ -140,6 +118,14 @@ export class WebSearchServer {
 
     this.searchLimiter = createSearchRateLimiter();
     this.fetchLimiter = createFetchRateLimiter();
+    this.contentFetcher = new ContentFetcher({
+      cache: this.cache,
+      getBrowserContext: () => this.getBrowserContext(),
+      fetchWaitUntil,
+      detectIntent: this.enableCrosslingual
+        ? (text) => this.cache.detectIntent(text)
+        : null,
+    });
 
     this.setupProviders();
     this.setupTools();
@@ -181,7 +167,7 @@ export class WebSearchServer {
         try { await this.browser.close(); } catch {}
         this.browser = null;
       }
-      this.pageCache.clear();
+      this.contentFetcher.close();
       this.cache.close();
     };
 
@@ -195,11 +181,13 @@ export class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return top results with an extracted answer. Use for factual questions, current versions, prices, or any live information.",
+          description: "Search the web and return results. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
           inputSchema: {
             type: "object",
             properties: {
-              query: { type: "string" },
+              query: { type: "string", description: "The search query" },
+              deep: { type: "boolean", description: "Fetch pages and extract answer (default: false)" },
+              max_results: { type: "number", description: "Number of results to return, 1-10 (default: 5)" },
             },
             required: ["query"],
           },
@@ -263,7 +251,7 @@ export class WebSearchServer {
       };
     }
 
-    const { query } = SearchSchema.parse(args);
+    const { query, deep = false, max_results = 5 } = SearchSchema.parse(args);
     const queryLocale = resolveSearchLocale(query, this.crossLingual
       ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
       : "eng_Latn");
@@ -271,7 +259,13 @@ export class WebSearchServer {
 
     if (cached !== null && cached.length > 0) {
       console.error(`Semantic cache hit for query: ${query}`);
-      return this.buildSearchResponse(query, cached);
+      if (deep) {
+        return this.buildSearchResponse(query, cached.slice(0, max_results));
+      }
+      const reranked = await this.cache.reRankResults(query, cached);
+      return {
+        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
+      };
     }
 
     // Search across configured providers
@@ -285,13 +279,20 @@ export class WebSearchServer {
     }
 
     await this.cache.set(query, results);
-    return this.buildSearchResponse(query, results);
+    if (!deep) {
+      const reranked = await this.cache.reRankResults(query, results);
+      return {
+        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
+      };
+    }
+
+    return this.buildSearchResponse(query, results.slice(0, max_results));
   }
 
   private async buildSearchResponse(query: string, results: SearchResultItem[]) {
     const urls = results.slice(0, 2).map((result) => result.url).filter(Boolean);
-    const pages = await Promise.all(urls.map((url) => this.fetchPageContent(url)));
-    const validPages = pages.filter((page): page is PageCacheEntry => page !== null);
+    const pages = await Promise.all(urls.map((url) => this.contentFetcher.fetchPage(url)));
+    const validPages = pages.filter((page) => page !== null);
 
     if (validPages.length > 0) {
       const combinedContent = validPages.map((page) => `# ${page.title}\n${page.content}`).join("\n\n---\n\n");
@@ -380,102 +381,21 @@ export class WebSearchServer {
       };
     }
 
-    // 1. Check Content Cache
-    if (!force_refresh) {
-      const cachedContent = await this.cache.getCachedContent(url);
-      if (cachedContent) {
-        return {
-          content: [{ type: "text", text: cachedContent }],
-        };
-      }
-    }
-
-    // HTTP-first: try plain fetch before spinning up Playwright
-    if (!process.env.FORCE_PLAYWRIGHT) {
-      const httpResult = await this.fetchViaHttp(url);
-      if (httpResult) {
-        const parsedArticle = this.parseHtmlToMarkdown(httpResult.html, url);
-        if (parsedArticle) {
-          const fullText = `# ${parsedArticle.title}\n\n${parsedArticle.markdown}`;
-          let intent: SearchIntent | undefined;
-          if (this.enableCrosslingual) {
-            intent = await this.cache.detectIntent(parsedArticle.title + " " + parsedArticle.markdown.slice(0, 200));
-          }
-          await this.cache.setCachedContent(url, fullText, parsedArticle.title, intent);
-          return { content: [{ type: "text", text: fullText }] };
-        }
-      }
-    }
-    // Fall through to Playwright for JS-rendered pages
-
-    // 2. Fetch Fresh Content
-    const context = await this.getBrowserContext();
-    const page = await context.newPage();
-
-    try {
-      let response;
-      try {
-        response = await page.goto(url, { waitUntil: this.fetchWaitUntil, timeout: 30000 });
-      } catch (error) {
-        const shouldRetry =
-          this.fetchWaitUntil === "networkidle" &&
-          error instanceof Error &&
-          error.name === "TimeoutError";
-
-        if (!shouldRetry) throw error;
-
-        console.error(`Fetch navigation timed out with networkidle for ${url}, retrying with domcontentloaded`);
-        response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 30000 });
-      }
-
-      const buffer = await response?.body();
-      
-      if (!buffer) {
-        return {
-          content: [{ type: "text", text: "Could not fetch page content." }],
-          isError: true,
-        };
-      }
-
-      let html = buffer.toString("utf-8");
-      // Detect charset from meta tag for proper encoding
-      const head = buffer.subarray(0, 2048).toString("ascii");
-      const charsetMatch = head.match(/<meta[^>]+charset=["']?\s*([a-zA-Z0-9-]+)/i);
-      if (charsetMatch) {
-        const detectedCharset = charsetMatch[1].toLowerCase();
-        if (detectedCharset !== "utf-8" && !detectedCharset.includes("utf")) {
-          html = iconv.decode(buffer, detectedCharset);
-        }
-      }
-
-      const parsedArticle = this.parseHtmlToMarkdown(html, url);
-      if (!parsedArticle) {
-        return {
-          content: [{ type: "text", text: "Could not parse article content from the page." }],
-          isError: true,
-        };
-      }
-      const fullText = `# ${parsedArticle.title}\n\n${parsedArticle.markdown}`;
-
-      // Detect intent for TTL-based caching
-      let intent: SearchIntent | undefined;
-      if (this.enableCrosslingual) {
-        intent = await this.cache.detectIntent(parsedArticle.title + " " + parsedArticle.markdown.slice(0, 200));
-      }
-
-      // Save to Content Cache with intent-based TTL
-      await this.cache.setCachedContent(url, fullText, parsedArticle.title, intent);
-
+    const result = await this.contentFetcher.fetchContent(url, force_refresh ?? false);
+    if (result.kind === "error") {
       return {
-        content: [{ type: "text", text: fullText }],
+        content: [{
+          type: "text",
+          text: result.reason === "parse_failed"
+            ? "Could not parse article content from the page."
+            : "Could not fetch page content.",
+        }],
+        isError: true,
       };
-    } finally {
-      try {
-        await page.close();
-      } catch (e) {
-        console.error("Error closing page:", e);
-      }
     }
+    return {
+      content: [{ type: "text", text: result.text }],
+    };
   }
 
   private async handleStatus() {
@@ -493,108 +413,6 @@ export class WebSearchServer {
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
-    };
-  }
-
-  private truncateContent(markdown: string): string {
-    return markdown.length > this.MAX_CONTENT_CHARS
-      ? `${markdown.slice(0, this.MAX_CONTENT_CHARS)}\n\n_[Content truncated at 50,000 characters]_`
-      : markdown;
-  }
-
-  private parseHtmlToMarkdown(html: string, url: string): { title: string; markdown: string } | null {
-    const dom = new JSDOM(html, { url });
-    const reader = new Readability(dom.window.document);
-    const article = reader.parse();
-    if (!article?.content || article.content.length <= 200) return null;
-    const markdown = this.turndown.turndown(article.content);
-    return { title: article.title || "Untitled Page", markdown: this.truncateContent(markdown) };
-  }
-
-  private async fetchViaHttp(url: string): Promise<{ html: string; buffer: Buffer } | null> {
-    try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        signal: AbortSignal.timeout(10000),
-      });
-      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) {
-        return null;
-      }
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.length < 500) return null;
-
-      let html = buffer.toString("utf-8");
-      // charset detection (same logic as Playwright path)
-      const head = buffer.subarray(0, 2048).toString("ascii");
-      const charsetMatch = head.match(/<meta[^>]+charset=["']?\s*([a-zA-Z0-9-]+)/i);
-      if (charsetMatch) {
-        const detectedCharset = charsetMatch[1].toLowerCase();
-        if (detectedCharset !== "utf-8" && !detectedCharset.includes("utf")) {
-          const iconvModule = await import("iconv-lite");
-          html = iconvModule.default.decode(buffer, detectedCharset);
-        }
-      }
-      return { html, buffer };
-    } catch {
-      return null;
-    }
-  }
-
-  private async fetchPageContent(url: string): Promise<PageCacheEntry | null> {
-    // Check in-memory cache first
-    const cached = this.pageCache.get(url);
-    if (cached) {
-      console.error(`Page cache hit: ${url}`);
-      return cached;
-    }
-
-    try {
-      // HTTP-first attempt
-      if (!process.env.FORCE_PLAYWRIGHT) {
-        const httpResult = await this.fetchViaHttp(url);
-        if (httpResult) {
-          const parsedArticle = this.parseHtmlToMarkdown(httpResult.html, url);
-          if (parsedArticle) {
-            const result: PageCacheEntry = { url, title: parsedArticle.title, content: parsedArticle.markdown };
-            this.pageCache.set(url, result);
-            return result;
-          }
-        }
-      }
-      // Fall through to Playwright
-
-      const context = await this.getBrowserContext();
-      const page = await context.newPage();
-      try {
-        const response = await page.goto(url, { waitUntil: "domcontentloaded", timeout: 15000 });
-        const buffer = await response?.body();
-        if (!buffer) return null;
-
-        let html = buffer.toString("utf-8");
-        const head = buffer.subarray(0, 2048).toString("ascii");
-        const charsetMatch = head.match(/<meta[^>]+charset=["']?\s*([a-zA-Z0-9-]+)/i);
-        if (charsetMatch) {
-          const detectedCharset = charsetMatch[1].toLowerCase();
-          if (detectedCharset !== "utf-8" && !detectedCharset.includes("utf")) {
-            html = iconv.decode(buffer, detectedCharset);
-          }
-        }
-
-        const parsedArticle = this.parseHtmlToMarkdown(html, url);
-        if (!parsedArticle) return null;
-
-        const result = { url, title: parsedArticle.title, content: parsedArticle.markdown };
-        this.pageCache.set(url, result);
-        return result;
-      } finally {
-        await page.close().catch(() => {});
-      }
-    } catch {
-      return null;
     }
   }
 
