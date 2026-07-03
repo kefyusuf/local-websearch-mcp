@@ -22,15 +22,15 @@
     "web-scraping",
     "markdown"
   ],
-  "author": "yukonit",
+  "author": "kefyusuf",
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/yukonit/my-websearch-mcp.git"
+    "url": "git+https://github.com/kefyusuf/my-websearch-mcp.git"
   },
-  "homepage": "https://github.com/yukonit/my-websearch-mcp#readme",
+  "homepage": "https://github.com/kefyusuf/my-websearch-mcp#readme",
   "bugs": {
-    "url": "https://github.com/yukonit/my-websearch-mcp/issues"
+    "url": "https://github.com/kefyusuf/my-websearch-mcp/issues"
   },
   "engines": {
     "node": ">=20"
