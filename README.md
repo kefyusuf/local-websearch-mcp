@@ -1,4 +1,4 @@
-# My Web Search MCP Server
+# Local Web Search MCP Server
 
 Offline-first MCP server for web search and content fetching. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, and direct-answer extraction.
 
@@ -38,7 +38,7 @@ Add the built server to your MCP client config:
   "mcpServers": {
     "websearch": {
       "command": "node",
-      "args": ["path/to/my-websearch-mcp/build/index.js"],
+      "args": ["path/to/local-websearch-mcp/build/index.js"],
       "env": {
         "RATE_LIMIT_SEARCH_PER_MIN": "10",
         "RATE_LIMIT_FETCH_PER_MIN": "20",

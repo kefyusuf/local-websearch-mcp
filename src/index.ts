@@ -75,7 +75,7 @@ export class WebSearchServer {
   constructor() {
     this.server = new Server(
       {
-        name: "my-websearch-mcp",
+        name: "local-websearch-mcp",
         version: "1.0.0",
       },
       {

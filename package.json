@@ -1,5 +1,5 @@
 {
-  "name": "my-websearch-mcp",
+  "name": "local-websearch-mcp",
   "version": "1.0.0",
   "description": "Offline-first MCP server for web search and content fetching - no API keys required. Uses local AI models for intent classification, cross-lingual search, and semantic re-ranking.",
   "type": "module",
@@ -26,11 +26,11 @@
   "license": "ISC",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kefyusuf/my-websearch-mcp.git"
+    "url": "git+https://github.com/kefyusuf/local-websearch-mcp.git"
   },
-  "homepage": "https://github.com/kefyusuf/my-websearch-mcp#readme",
+  "homepage": "https://github.com/kefyusuf/local-websearch-mcp#readme",
   "bugs": {
-    "url": "https://github.com/kefyusuf/my-websearch-mcp/issues"
+    "url": "https://github.com/kefyusuf/local-websearch-mcp/issues"
   },
   "engines": {
     "node": ">=20"
