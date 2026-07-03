@@ -1,35 +1,37 @@
 # My Web Search MCP Server
 
-A high-performance, AI-powered MCP (Model Context Protocol) server for web search and content fetching — no external API keys required. Runs entirely offline using local models.
+Offline-first MCP server for web search and content fetching. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, and direct-answer extraction.
 
 ## Features
 
-- **Browser Context Pooling:** Persistent browser instance — no cold start on every search.
-- **Vector Indexing (sqlite-vec):** Semantic search across thousands of records with C-level performance.
-- **Search Intent Classification:** Classifies queries as Technical, News, or General to optimize cache TTL and search strategy.
-- **Cross-lingual Search:** Detects non-English technical queries, translates them, and performs parallel search in both languages. Results are merged and re-ranked.
-- **Search Engine Fallback:** Brave Search → Google → DuckDuckGo Lite with automatic failover.
-- **SSRF Protection:** Blocks access to local/private network resources for security.
-- **Rate Limiting:** Token bucket rate limiter (configurable via environment variables).
-- **Encoding Detection:** Automatic charset detection from meta tags (ISO-8859-9, Windows-1254, etc.).
-- **Semantic Caching:** Content fetched from URLs is cached with smart TTL based on content category.
-- **Responsible Scraping:** Rate-limited, polite user-agent, single persistent browser context.
+- Browser context pooling with a persistent Playwright browser instance.
+- Web search through configurable providers with health tracking and fallback.
+- HTTP-first page fetching with Playwright fallback for rendered pages.
+- SSRF protection for `fetch_content` by blocking localhost and private network targets.
+- Token-bucket rate limiting for search and fetch tools.
+- Semantic cache backed by SQLite and `sqlite-vec`.
+- Optional cross-lingual query expansion with local Transformers.js models.
+- Optional Ollama integration for local LLM answer extraction.
+- Clean Markdown extraction through Readability, JSDOM, and Turndown.
+
+## Requirements
+
+- Node.js 20 or newer.
+- npm.
+- Network access during installation for npm packages, Playwright Chromium, and first-run model downloads.
 
 ## Installation
 
-Requires Node.js >= 18
-
 ```bash
 npm install
-npx playwright install chromium
 npm run build
 ```
 
-> On first run, Transformers.js models are downloaded automatically (~500 MB, one-time). The server will not respond during download. Subsequent starts are instant.
+The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache.
 
 ## MCP Client Configuration
 
-Add to your MCP client config (e.g. `claude_desktop_config.json`):
+Add the built server to your MCP client config:
 
 ```json
 {
@@ -39,7 +41,10 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
       "args": ["path/to/my-websearch-mcp/build/index.js"],
       "env": {
         "RATE_LIMIT_SEARCH_PER_MIN": "10",
-        "RATE_LIMIT_FETCH_PER_MIN": "20"
+        "RATE_LIMIT_FETCH_PER_MIN": "20",
+        "SEARCH_PROVIDERS": "duckduckgo,bing",
+        "ENABLE_CROSSLINGUAL": "true",
+        "CACHE_DB_PATH": "websearch_cache.db"
       }
     }
   }
@@ -49,49 +54,53 @@ Add to your MCP client config (e.g. `claude_desktop_config.json`):
 ## Tools
 
 | Tool | Description |
-|------|-------------|
-| `web_search` | Searches the web with intent classification, cross-lingual support, semantic re-ranking, and multi-engine fallback. |
-| `fetch_content` | Fetches a URL and returns clean Markdown with smart TTL caching and charset detection. |
+| --- | --- |
+| `web_search` | Searches the web and returns ranked results. Set `deep=true` to fetch top result pages and extract a direct answer. |
+| `fetch_content` | Fetches a URL and returns clean Markdown with content caching and charset handling. |
+| `server_status` | Returns provider availability, cache stats, browser state, feature flags, and uptime. |
+
+## Configuration
+
+| Variable | Default | Description |
+| --- | --- | --- |
+| `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
+| `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
+| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider order. Supported values: `duckduckgo`, `bing`, `brave`, `google`. |
+| `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. `.env.example` enables it for richer local behavior. |
+| `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
+| `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
+| `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
+| `CACHE_CLEANUP_INTERVAL_HOURS` | `24` | Interval for expired content cache cleanup. |
+| `ENABLE_OLLAMA` | `false` | Enables local Ollama summarization for deep search answers. |
+| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL. |
+| `OLLAMA_MODEL` | `llama3.2` | Ollama model name. |
 
 ## Docker
 
 ```bash
-npm run docker:build  # Build Docker image
-npm run docker:up     # Start with docker compose
+npm run docker:build
+npm run docker:up
 ```
 
-Docker Compose mounts persistent volumes for the SQLite cache database and HuggingFace model cache.
+Docker Compose stores the SQLite cache in a named volume mounted at `/app/data` and stores Hugging Face models in a separate named volume. The container sets `CACHE_DB_PATH=/app/data/websearch_cache.db`.
 
-## Testing
+## Development
 
 ```bash
-npm test              # Single run (vitest)
-npm run test:watch    # Watch mode
-npm run test:coverage # Coverage report
+npm run build
+npm run typecheck
+npm test
+npm audit --audit-level=moderate
+npm pack --dry-run --json
 ```
 
-## Tech Stack
+## npm Packaging
 
-| Component | Technology |
-|-----------|-----------|
-| Embedding | `Xenova/paraphrase-multilingual-MiniLM-L12-v2` (384-dim, 50+ languages) |
-| Intent Classification | `Xenova/nli-deberta-v3-xsmall` (zero-shot) |
-| Language Detection | `onnx-community/language_detection-ONNX` (200 languages, FLORES-200) |
-| Translation | `Xenova/opus-mt-tr-en` (on-demand, expandable registry) |
-| Vector Search | SQLite + `sqlite-vec` extension (C-level native, JS fallback) |
-| Browser Automation | Playwright (persistent instance, context pooling) |
-| Content Cleaning | `@mozilla/readability` + JSDOM + Turndown |
-| Encoding | `iconv-lite` (meta charset-based detection) |
-| Test Runner | vitest |
+The npm package includes only `build/`, `README.md`, `LICENSE`, and `SECURITY.md`. `npm pack` runs `npm run build` through `prepack` so the package contains compiled JavaScript instead of local planning files, tests, caches, or source-only artifacts.
 
-## Rate Limiting
+## Security
 
-| Tool | Default | Environment Variable |
-|------|---------|---------------------|
-| `web_search` | 10/min | `RATE_LIMIT_SEARCH_PER_MIN` |
-| `fetch_content` | 20/min | `RATE_LIMIT_FETCH_PER_MIN` |
-
-Rate limiter uses a token bucket algorithm. Burst capacity is 5 tokens. When exceeded, the client receives an error with a retry-after hint.
+See `SECURITY.md` for reporting instructions and current dependency audit notes.
 
 ## License
 

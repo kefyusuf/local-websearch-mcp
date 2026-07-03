@@ -2,18 +2,16 @@ node_modules/
 build/
 coverage/
 .cache/
-
-# Local configuration and generated state
+.git/
+.github/
+.ai/
+.claude/
 *.db
 *.db-journal
 *.db-wal
 *.db-shm
 .env
 .env.local
-
-# Local agent and review artifacts
-.ai/
-.claude/
 AGENTS.md
 PLAN.md
 REVIEW.md
