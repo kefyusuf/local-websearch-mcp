@@ -90,7 +90,22 @@ try {
   });
   assertNoError(status, "server_status");
   const statusText = status.result.content?.[0]?.text ?? "";
-  JSON.parse(statusText);
+  const parsedStatus = JSON.parse(statusText);
+  assertHasStatusShape(parsedStatus);
+
+  const invalidSearch = await request("tools/call", {
+    name: "web_search",
+    arguments: {
+      query: "",
+    },
+  });
+  if (invalidSearch.result?.isError !== true) {
+    fail("web_search did not reject an empty query during smoke test.");
+  }
+  const invalidSearchText = invalidSearch.result.content?.[0]?.text ?? "";
+  if (!invalidSearchText.includes("Invalid arguments:")) {
+    fail(`web_search returned an unexpected validation error: ${invalidSearchText}`);
+  }
 
   const blockedFetch = await request("tools/call", {
     name: "fetch_content",
@@ -100,6 +115,10 @@ try {
   });
   if (blockedFetch.result?.isError !== true) {
     fail("fetch_content did not block localhost during smoke test.");
+  }
+  const blockedFetchText = blockedFetch.result.content?.[0]?.text ?? "";
+  if (!blockedFetchText.includes("blocked for security reasons")) {
+    fail(`fetch_content returned an unexpected localhost block message: ${blockedFetchText}`);
   }
 
   clearTimeout(timeout);
@@ -137,6 +156,27 @@ function assertNoError(response, label) {
 function assertIncludes(values, expected, label) {
   if (!values.includes(expected)) {
     fail(`${label} missing ${expected}; got ${values.join(", ")}`);
+  }
+}
+
+function assertHasStatusShape(status) {
+  if (!Array.isArray(status.providers) || status.providers.length === 0) {
+    fail("server_status did not include providers.");
+  }
+
+  const provider = status.providers[0];
+  for (const field of ["name", "available", "recentAttempts", "recentSuccesses", "recentFailures", "backoffRemainingMs"]) {
+    if (!(field in provider)) {
+      fail(`server_status provider missing ${field}.`);
+    }
+  }
+
+  if (!status.cache || typeof status.cache.contentCount !== "number" || typeof status.cache.vectorCount !== "number") {
+    fail("server_status did not include cache counts.");
+  }
+
+  if (!status.config || !Array.isArray(status.config.searchProviders) || typeof status.config.fetchWaitUntil !== "string") {
+    fail("server_status did not include runtime config.");
   }
 }
 
