@@ -21,6 +21,15 @@ describe("SearchSchema", () => {
     });
   });
 
+  it("accepts an optional domain filter", () => {
+    const parsed = SearchSchema.parse({ query: "docs", domain: "react.dev" });
+
+    expect(parsed).toEqual({
+      query: "docs",
+      domain: "react.dev",
+    });
+  });
+
   it("rejects max_results above the upper bound", () => {
     expect(() => SearchSchema.parse({ query: "test", max_results: 11 })).toThrowError(ZodError);
   });

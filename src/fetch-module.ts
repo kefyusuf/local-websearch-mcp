@@ -25,7 +25,7 @@ type FetchFailure = {
 type FetchArticleResult = {
   kind: "article";
   article: FetchArticle;
-  source: "http" | "playwright" | "page-cache";
+  source: "http" | "playwright" | "page-cache" | "github-raw" | "rss";
 };
 
 type HttpFetchResult =
@@ -33,11 +33,16 @@ type HttpFetchResult =
   | { kind: "blocked" }
   | null;
 
+type TextFetchResult =
+  | { kind: "text"; url: string; text: string; contentType: string }
+  | { kind: "blocked" }
+  | null;
+
 export type FetchContentResult =
   | {
       kind: "content";
       text: string;
-      source: "content-cache" | "http" | "playwright";
+      source: "content-cache" | "http" | "playwright" | "github-raw" | "rss";
     }
   | FetchFailure;
 
@@ -147,6 +152,16 @@ export class ContentFetcher {
     }
 
     if (!this.forcePlaywright()) {
+      const fastPathResult = await this.fetchViaFastPath(url);
+      if (fastPathResult?.kind === "blocked") {
+        return { kind: "error", reason: "blocked_url" };
+      }
+
+      if (fastPathResult) {
+        await this.persistArticle(fastPathResult.article, options);
+        return fastPathResult;
+      }
+
       const httpResult = await this.fetchViaHttp(url);
       if (httpResult?.kind === "blocked") {
         return { kind: "error", reason: "blocked_url" };
@@ -252,7 +267,62 @@ export class ContentFetcher {
     }
 
     const intent = await this.detectArticleIntent(article);
-    await this.cache.setCachedContent(article.url, article.fullText, article.title, intent);
+      await this.cache.setCachedContent(article.url, article.fullText, article.title, intent);
+  }
+
+  private async fetchViaFastPath(url: string): Promise<FetchArticleResult | { kind: "blocked" } | null> {
+    const githubArticle = await this.fetchGitHubRawArticle(url);
+    if (githubArticle === "blocked") return { kind: "blocked" };
+    if (githubArticle) {
+      return {
+        kind: "article",
+        article: githubArticle,
+        source: "github-raw",
+      };
+    }
+
+    const rssArticle = await this.fetchRssArticle(url);
+    if (rssArticle === "blocked") return { kind: "blocked" };
+    if (rssArticle) {
+      return {
+        kind: "article",
+        article: rssArticle,
+        source: "rss",
+      };
+    }
+
+    return null;
+  }
+
+  private async fetchGitHubRawArticle(url: string): Promise<FetchArticle | "blocked" | null> {
+    const candidates = toGitHubRawCandidates(url);
+    if (candidates.length === 0) return null;
+
+    for (const candidate of candidates) {
+      const result = await this.fetchText(candidate, "text/markdown,text/plain,*/*");
+      if (result?.kind === "blocked") return "blocked";
+      if (!result || result.text.trim().length < 20) continue;
+
+      return this.parseMarkdownToArticle(result.text, url, result.url);
+    }
+
+    return null;
+  }
+
+  private async fetchRssArticle(url: string): Promise<FetchArticle | "blocked" | null> {
+    const candidates = toRssCandidates(url);
+    if (candidates.length === 0) return null;
+
+    for (const candidate of candidates) {
+      const result = await this.fetchText(candidate, "application/rss+xml,application/atom+xml,text/xml,application/xml,*/*");
+      if (result?.kind === "blocked") return "blocked";
+      if (!result || !looksLikeFeed(result.text)) continue;
+
+      const article = this.parseRssToArticle(result.text, url, result.url);
+      if (article) return article;
+    }
+
+    return null;
   }
 
   private async detectArticleIntent(article: FetchArticle): Promise<SearchIntent | undefined> {
@@ -343,6 +413,48 @@ export class ContentFetcher {
     }
   }
 
+  private async fetchText(url: string, accept: string): Promise<TextFetchResult> {
+    let currentUrl = url;
+
+    try {
+      for (let redirectCount = 0; redirectCount <= ContentFetcher.MAX_HTTP_REDIRECTS; redirectCount += 1) {
+        if (!(await this.isFetchUrlAllowed(currentUrl))) {
+          return { kind: "blocked" };
+        }
+
+        const response = await fetch(currentUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": accept,
+          },
+          redirect: "manual",
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (isRedirectStatus(response.status)) {
+          const location = response.headers.get("location");
+          if (!location) return null;
+
+          currentUrl = new URL(location, currentUrl).toString();
+          continue;
+        }
+
+        if (!response.ok) return null;
+
+        return {
+          kind: "text",
+          url: currentUrl,
+          text: await response.text(),
+          contentType: response.headers.get("content-type") ?? "",
+        };
+      }
+    } catch {
+      return null;
+    }
+
+    return null;
+  }
+
   private async isFetchUrlAllowed(url: string): Promise<boolean> {
     return (await validatePublicHttpUrl(url)).ok;
   }
@@ -359,6 +471,39 @@ export class ContentFetcher {
     }
     return html;
   }
+
+  private parseMarkdownToArticle(markdown: string, originalUrl: string, finalUrl: string): FetchArticle {
+    const stripped = stripMarkdown(markdown);
+    const title = extractMarkdownTitle(markdown) || extractTitleFromUrl(originalUrl);
+    const content = this.truncateContent(stripped);
+
+    return {
+      url: finalUrl,
+      title,
+      content,
+      fullText: `# ${title}\n\n${content}`,
+    };
+  }
+
+  private parseRssToArticle(xml: string, originalUrl: string, finalUrl: string): FetchArticle | null {
+    const items = extractFeedItems(xml);
+    if (items.length === 0) return null;
+
+    const title = extractFeedTitle(xml) || extractTitleFromUrl(originalUrl);
+    const content = this.truncateContent(items.map((item, index) => {
+      const parts = [`${index + 1}. ${item.title || item.url}`];
+      if (item.url) parts.push(`   ${item.url}`);
+      if (item.snippet) parts.push(`   ${item.snippet}`);
+      return parts.join("\n");
+    }).join("\n\n"));
+
+    return {
+      url: finalUrl,
+      title,
+      content,
+      fullText: `# ${title}\n\n${content}`,
+    };
+  }
 }
 
 function isEnabledEnvFlag(value: string | undefined): boolean {
@@ -367,4 +512,155 @@ function isEnabledEnvFlag(value: string | undefined): boolean {
 
 function isRedirectStatus(status: number): boolean {
   return status >= 300 && status < 400;
+}
+
+const GITHUB_RAW_BASE = "https://raw.githubusercontent.com";
+const README_NAMES = ["README.md", "readme.md", "Readme.md"];
+
+function toGitHubRawCandidates(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname === "raw.githubusercontent.com") {
+    return [parsed.toString()];
+  }
+
+  if (hostname !== "github.com" && hostname !== "www.github.com") {
+    return [];
+  }
+
+  const parts = parsed.pathname.split("/").filter(Boolean);
+  if (parts.length < 2) return [];
+
+  const owner = parts[0];
+  const repo = parts[1];
+
+  if (parts.length === 2) {
+    return ["main", "master"].flatMap((branch) =>
+      README_NAMES.map((name) => `${GITHUB_RAW_BASE}/${owner}/${repo}/${branch}/${name}`)
+    );
+  }
+
+  if (parts[2] === "blob" && parts.length >= 5) {
+    return [`${GITHUB_RAW_BASE}/${owner}/${repo}/${parts[3]}/${parts.slice(4).join("/")}`];
+  }
+
+  if (parts[2] === "tree" && parts.length >= 4) {
+    const branch = parts[3];
+    const path = parts.slice(4).join("/");
+    const prefix = path ? `${path}/` : "";
+    return README_NAMES.map((name) => `${GITHUB_RAW_BASE}/${owner}/${repo}/${branch}/${prefix}${name}`);
+  }
+
+  return [];
+}
+
+function toRssCandidates(url: string): string[] {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return [];
+  }
+
+  const pathname = parsed.pathname.toLowerCase();
+  const shouldProbe = pathname.endsWith(".xml") ||
+    pathname.includes("/feed") ||
+    pathname.includes("/rss") ||
+    /\/(blog|news|articles|posts?)\/?$/.test(pathname);
+
+  if (!shouldProbe) return [];
+
+  const rootCandidates = ["/feed.xml", "/rss.xml", "/atom.xml", "/feed/", "/rss/", "/index.xml"].map((path) => {
+    const candidate = new URL(parsed.toString());
+    candidate.pathname = path;
+    candidate.search = "";
+    candidate.hash = "";
+    return candidate.toString();
+  });
+
+  return [parsed.toString(), ...rootCandidates].filter((candidate, index, values) => values.indexOf(candidate) === index);
+}
+
+function stripMarkdown(text: string): string {
+  return text
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/^---[\s\S]*?---\s*/m, "")
+    .replace(/<details>[\s\S]*?<\/details>/gi, "")
+    .replace(/<img\s+[^>]*alt=["']([^"']*)["'][^>]*\/?>/gi, "$1")
+    .replace(/<img\s+[^>]*\/?>/gi, "")
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/__([^_]+)__/g, "$1")
+    .replace(/`([^`]+)`/g, "$1")
+    .replace(/^#{1,6}\s+/gm, "")
+    .replace(/^>\s?/gm, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function extractMarkdownTitle(text: string): string {
+  const heading = text.match(/^#\s+(.+)$/m);
+  if (heading) return heading[1].trim();
+
+  const titleLine = text.match(/^title:\s*(.+)$/im);
+  return titleLine ? titleLine[1].trim() : "";
+}
+
+function extractTitleFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    const parts = parsed.pathname.split("/").filter(Boolean);
+    return parts.length > 0 ? parts[parts.length - 1].replace(/[-_]/g, " ") : parsed.hostname;
+  } catch {
+    return "Untitled Page";
+  }
+}
+
+function looksLikeFeed(text: string): boolean {
+  return text.includes("<rss") || text.includes("<feed") || text.includes("<channel");
+}
+
+function stripXmlTags(text: string): string {
+  return text
+    .replace(/<!\[CDATA\[([\s\S]*?)\]\]>/g, "$1")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, "\"")
+    .replace(/&#39;/g, "'")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+function extractFeedTitle(xml: string): string {
+  const match = xml.match(/<title[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i) ||
+    xml.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? stripXmlTags(match[1]).slice(0, 120) : "";
+}
+
+function extractFeedItems(xml: string): Array<{ title: string; url: string; snippet: string }> {
+  const blocks = xml.match(/<item[\s\S]*?<\/item>/gi) || xml.match(/<entry[\s\S]*?<\/entry>/gi) || [];
+
+  return blocks.slice(0, 25).map((block) => {
+    const titleMatch = block.match(/<title[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/title>/i) ||
+      block.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+    const linkMatch = block.match(/<link[^>]*href=["']([^"']+)["'][^>]*\/?>/i) ||
+      block.match(/<link>([^<]+)<\/link>/i);
+    const descriptionMatch = block.match(/<description[^>]*><!\[CDATA\[([\s\S]*?)\]\]><\/description>/i) ||
+      block.match(/<description[^>]*>([\s\S]*?)<\/description>/i) ||
+      block.match(/<summary[^>]*>([\s\S]*?)<\/summary>/i);
+
+    return {
+      title: titleMatch ? stripXmlTags(titleMatch[1]).slice(0, 140) : "",
+      url: linkMatch ? stripXmlTags(linkMatch[1]) : "",
+      snippet: descriptionMatch ? stripXmlTags(descriptionMatch[1]).slice(0, 240) : "",
+    };
+  }).filter((item) => item.title || item.url);
 }
