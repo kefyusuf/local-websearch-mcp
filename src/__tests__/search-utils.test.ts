@@ -6,6 +6,7 @@ import {
   parseBingResults,
   parseBraveResults,
   parseDuckDuckGoResults,
+  parseGoogleResults,
   resolveSearchLocale,
 } from "../search-utils.js";
 
@@ -102,6 +103,32 @@ describe("search-utils", () => {
       url: "https://bigpara.hurriyet.com.tr/altin/",
       snippet: "Anl\u0131k alt\u0131n fiyatlar\u0131 ve piyasa \u00f6zeti.",
       source: "brave",
+    });
+  });
+
+  it("should parse Google results with heading links", () => {
+    const html = `
+      <html><body>
+        <div>
+          <div>
+            <a href="https://example.com/mcp-guide">
+              <h3>Model Context Protocol Guide</h3>
+            </a>
+            <div>
+              <span class="aCOpRe">A concise guide to MCP servers and tools.</span>
+            </div>
+          </div>
+        </div>
+      </body></html>
+    `;
+
+    const results = parseGoogleResults(html);
+
+    expect(results[0]).toEqual({
+      title: "Model Context Protocol Guide",
+      url: "https://example.com/mcp-guide",
+      snippet: "A concise guide to MCP servers and tools.",
+      source: "google",
     });
   });
 });

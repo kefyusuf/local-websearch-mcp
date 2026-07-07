@@ -110,7 +110,7 @@ export function formatSearchResults(query: string, results: SearchResultItem[]):
       a.patch > b.patch ? a : b
     );
     const labelText = best.label ? `${best.label} ${best.major}.${best.minor}` : `v${best.major}.${best.minor}`;
-    summary = `Answer: The latest version found is ${labelText}.\n\n`;
+    summary = `Version hint from search snippets: ${labelText}.\n\n`;
   }
 
   const formatted = results.map((result, i) =>

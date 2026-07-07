@@ -77,6 +77,28 @@ describe("SemanticCache", () => {
     expect(ranked[0].title).toBe("MCP Guide");
   });
 
+  it("should respect the requested re-rank limit", async () => {
+    const vectors: Record<string, number[]> = {
+      "MCP protocol": makeVec([1, 0]),
+    };
+    const raw = Array.from({ length: 8 }, (_, index) => {
+      const title = `Result ${index}`;
+      const snippet = `Snippet ${index}`;
+      vectors[`${title} ${snippet}`] = makeVec([1 - index * 0.01, index * 0.01]);
+      return {
+        title,
+        snippet,
+        url: `https://example.com/${index}`,
+        source: "test",
+      };
+    });
+    cache = new SemanticCache(createMockEmbedding(vectors), store);
+
+    const ranked = await cache.reRankResults("MCP protocol", raw, 8);
+
+    expect(ranked).toHaveLength(8);
+  });
+
   it("should bootstrap embeddings even when provider reports unavailable before first call", async () => {
     const lazyProvider: IEmbeddingProvider = {
       getEmbedding: vi.fn(async (text: string) => {

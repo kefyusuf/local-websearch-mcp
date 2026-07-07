@@ -9,15 +9,13 @@ services:
       RATE_LIMIT_SEARCH_PER_MIN: "10"
       RATE_LIMIT_FETCH_PER_MIN: "20"
       SEARCH_PROVIDERS: "duckduckgo,bing"
-      ENABLE_CROSSLINGUAL: "true"
+      ENABLE_CROSSLINGUAL: "false"
       FETCH_WAIT_UNTIL: "domcontentloaded"
       CACHE_DB_PATH: "/app/data/websearch_cache.db"
     volumes:
       - websearch-data:/app/data
       - websearch-models:/root/.cache/huggingface
-      - websearch-playwright:/ms-playwright
 
 volumes:
   websearch-data:
   websearch-models:
-  websearch-playwright:

@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { isPrivateIP, isPrivateHost } from "../ssrf.js";
+import { isPrivateIP, isPrivateHost, validatePublicHttpUrl } from "../ssrf.js";
 
 describe("isPrivateIP", () => {
   it("should block loopback (127.x.x.x)", () => {
@@ -83,5 +83,36 @@ describe("isPrivateHost", () => {
   it("should allow public hostnames", async () => {
     expect(await isPrivateHost("google.com")).toBe(false);
     expect(await isPrivateHost("example.com")).toBe(false);
+  });
+});
+
+describe("validatePublicHttpUrl", () => {
+  it("rejects unsupported protocols before network access", async () => {
+    await expect(validatePublicHttpUrl("file:///etc/passwd")).resolves.toMatchObject({
+      ok: false,
+      reason: "unsupported_protocol",
+    });
+    await expect(validatePublicHttpUrl("ftp://example.com/file")).resolves.toMatchObject({
+      ok: false,
+      reason: "unsupported_protocol",
+    });
+    await expect(validatePublicHttpUrl("data:text/plain,hello")).resolves.toMatchObject({
+      ok: false,
+      reason: "unsupported_protocol",
+    });
+  });
+
+  it("rejects private HTTP hosts", async () => {
+    await expect(validatePublicHttpUrl("http://127.0.0.1:8080/admin")).resolves.toMatchObject({
+      ok: false,
+      reason: "private_host",
+      hostname: "127.0.0.1",
+    });
+  });
+
+  it("accepts public HTTP URLs", async () => {
+    await expect(validatePublicHttpUrl("https://example.com/page")).resolves.toMatchObject({
+      ok: true,
+    });
   });
 });

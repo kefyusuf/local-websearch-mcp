@@ -149,7 +149,7 @@ export class SemanticCache {
 
   // --- Semantic Re-ranking ---
 
-  async reRankResults(query: string, results: SearchResultItem[]): Promise<SearchResultItem[]> {
+  async reRankResults(query: string, results: SearchResultItem[], limit: number = 5): Promise<SearchResultItem[]> {
     if (results.length === 0) return results;
 
     const queryVector = await this.getQueryVector(query);
@@ -167,10 +167,10 @@ export class SemanticCache {
       );
 
       const sorted = rankedResults.sort((a, b) => b.semanticScore - a.semanticScore);
-      return sorted.slice(0, 5);
+      return sorted.slice(0, limit);
     } catch (error) {
       console.error("Re-ranking error:", error);
-      return results.slice(0, 5);
+      return results.slice(0, limit);
     }
   }
 

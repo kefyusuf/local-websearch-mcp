@@ -6,6 +6,7 @@ import TurndownService from "turndown";
 import iconv from "iconv-lite";
 import type { SearchIntent } from "./cache/intent.js";
 import type { SemanticCache } from "./cache/semantic-cache.js";
+import { validatePublicHttpUrl } from "./ssrf.js";
 
 type WaitUntilMode = "domcontentloaded" | "networkidle";
 
@@ -18,7 +19,7 @@ export type FetchArticle = {
 
 type FetchFailure = {
   kind: "error";
-  reason: "fetch_failed" | "parse_failed";
+  reason: "fetch_failed" | "parse_failed" | "blocked_url";
 };
 
 type FetchArticleResult = {
@@ -26,6 +27,11 @@ type FetchArticleResult = {
   article: FetchArticle;
   source: "http" | "playwright" | "page-cache";
 };
+
+type HttpFetchResult =
+  | { kind: "html"; html: string; buffer: Buffer }
+  | { kind: "blocked" }
+  | null;
 
 export type FetchContentResult =
   | {
@@ -45,6 +51,8 @@ type ContentFetcherOptions = {
 };
 
 export class ContentFetcher {
+  private static readonly MAX_HTTP_REDIRECTS = 5;
+
   private readonly cache: SemanticCache;
   private readonly getBrowserContext: () => Promise<BrowserContext>;
   private readonly fetchWaitUntil: WaitUntilMode;
@@ -60,7 +68,7 @@ export class ContentFetcher {
     this.fetchWaitUntil = options.fetchWaitUntil;
     this.detectIntent = options.detectIntent ?? null;
     this.maxContentChars = options.maxContentChars ?? 50_000;
-    this.forcePlaywright = options.forcePlaywright ?? (() => Boolean(process.env.FORCE_PLAYWRIGHT));
+    this.forcePlaywright = options.forcePlaywright ?? (() => isEnabledEnvFlag(process.env.FORCE_PLAYWRIGHT));
     this.turndown = new TurndownService({
       headingStyle: "atx",
       codeBlockStyle: "fenced",
@@ -122,6 +130,10 @@ export class ContentFetcher {
       useConfiguredWaitUntil: boolean;
     }
   ): Promise<FetchArticleResult | FetchFailure> {
+    if (!(await this.isFetchUrlAllowed(url))) {
+      return { kind: "error", reason: "blocked_url" };
+    }
+
     if (options.allowPageCache) {
       const cachedPage = this.pageCache.get(url);
       if (cachedPage) {
@@ -136,6 +148,10 @@ export class ContentFetcher {
 
     if (!this.forcePlaywright()) {
       const httpResult = await this.fetchViaHttp(url);
+      if (httpResult?.kind === "blocked") {
+        return { kind: "error", reason: "blocked_url" };
+      }
+
       if (httpResult) {
         const parsedArticle = this.parseHtmlToArticle(httpResult.html, url);
         if (parsedArticle) {
@@ -166,6 +182,17 @@ export class ContentFetcher {
     try {
       let response;
       const waitUntil = options.useConfiguredWaitUntil ? this.fetchWaitUntil : "domcontentloaded";
+
+      await page.route("**/*", async (route) => {
+        const requestUrl = route.request().url();
+        if (await this.isFetchUrlAllowed(requestUrl)) {
+          await route.continue();
+          return;
+        }
+
+        console.error(`Blocked private or unsupported Playwright request: ${requestUrl}`);
+        await route.abort("blockedbyclient");
+      });
 
       try {
         response = await page.goto(url, { waitUntil, timeout: 30000 });
@@ -261,33 +288,63 @@ export class ContentFetcher {
     };
   }
 
-  private async fetchViaHttp(url: string): Promise<{ html: string; buffer: Buffer } | null> {
+  private async fetchViaHttp(url: string): Promise<HttpFetchResult> {
+    let currentUrl = url;
+
     try {
-      const response = await fetch(url, {
-        headers: {
-          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-          "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-          "Accept-Language": "en-US,en;q=0.9",
-        },
-        signal: AbortSignal.timeout(10000),
-      });
+      for (let redirectCount = 0; redirectCount <= ContentFetcher.MAX_HTTP_REDIRECTS; redirectCount += 1) {
+        if (!(await this.isFetchUrlAllowed(currentUrl))) {
+          return { kind: "blocked" };
+        }
 
-      if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) {
-        return null;
+        const response = await fetch(currentUrl, {
+          headers: {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+          },
+          redirect: "manual",
+          signal: AbortSignal.timeout(10000),
+        });
+
+        if (isRedirectStatus(response.status)) {
+          const location = response.headers.get("location");
+          if (!location) return null;
+
+          const nextUrl = new URL(location, currentUrl).toString();
+          if (!(await this.isFetchUrlAllowed(nextUrl))) {
+            console.error(`Blocked private or unsupported HTTP redirect: ${nextUrl}`);
+            return { kind: "blocked" };
+          }
+
+          currentUrl = nextUrl;
+          continue;
+        }
+
+        if (!response.ok || !response.headers.get("content-type")?.includes("text/html")) {
+          return null;
+        }
+
+        const buffer = Buffer.from(await response.arrayBuffer());
+        if (buffer.length < 500) {
+          return null;
+        }
+
+        return {
+          kind: "html",
+          html: this.decodeHtmlBuffer(buffer),
+          buffer,
+        };
       }
 
-      const buffer = Buffer.from(await response.arrayBuffer());
-      if (buffer.length < 500) {
-        return null;
-      }
-
-      return {
-        html: this.decodeHtmlBuffer(buffer),
-        buffer,
-      };
+      return null;
     } catch {
       return null;
     }
+  }
+
+  private async isFetchUrlAllowed(url: string): Promise<boolean> {
+    return (await validatePublicHttpUrl(url)).ok;
   }
 
   private decodeHtmlBuffer(buffer: Buffer): string {
@@ -302,4 +359,12 @@ export class ContentFetcher {
     }
     return html;
   }
+}
+
+function isEnabledEnvFlag(value: string | undefined): boolean {
+  return value === "true" || value === "1";
+}
+
+function isRedirectStatus(status: number): boolean {
+  return status >= 300 && status < 400;
 }

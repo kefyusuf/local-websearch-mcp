@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
@@ -8,7 +9,7 @@ import { pathToFileURL } from "node:url";
 import { chromium, Browser, BrowserContext } from "playwright";
 import { z } from "zod";
 import { extractAnswerFromContent, formatSearchResults } from "./answer-extraction.js";
-import { isPrivateHost } from "./ssrf.js";
+import { validatePublicHttpUrl } from "./ssrf.js";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
@@ -247,7 +248,7 @@ export class WebSearchServer {
       if (deep) {
         return this.buildSearchResponse(query, cached.slice(0, max_results));
       }
-      const reranked = await this.cache.reRankResults(query, cached);
+      const reranked = await this.cache.reRankResults(query, cached, max_results);
       return {
         content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
       };
@@ -265,7 +266,7 @@ export class WebSearchServer {
 
     await this.cache.set(query, results);
     if (!deep) {
-      const reranked = await this.cache.reRankResults(query, results);
+      const reranked = await this.cache.reRankResults(query, results, max_results);
       return {
         content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
       };
@@ -288,7 +289,7 @@ export class WebSearchServer {
       };
     }
 
-    const rankedResults = await this.cache.reRankResults(query, results);
+    const rankedResults = await this.cache.reRankResults(query, results, results.length);
     return {
       content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
     };
@@ -345,12 +346,11 @@ export class WebSearchServer {
     const { url, force_refresh } = FetchSchema.parse(args);
 
     // SSRF Protection: Block local/private resources via DNS resolution
-    const parsedUrl = new URL(url);
-    const hostname = parsedUrl.hostname;
+    const validation = await validatePublicHttpUrl(url);
 
-    if (await isPrivateHost(hostname)) {
+    if (!validation.ok) {
       return {
-        content: [{ type: "text", text: `Access to local/private resource is blocked for security reasons: ${hostname}` }],
+        content: [{ type: "text", text: `Access to unsupported or local/private resource is blocked for security reasons: ${validation.hostname ?? url}` }],
         isError: true,
       };
     }
@@ -362,7 +362,9 @@ export class WebSearchServer {
           type: "text",
           text: result.reason === "parse_failed"
             ? "Could not parse article content from the page."
-            : "Could not fetch page content.",
+            : result.reason === "blocked_url"
+              ? "Access to unsupported or local/private resource is blocked for security reasons."
+              : "Could not fetch page content.",
         }],
         isError: true,
       };
@@ -396,16 +398,6 @@ export class WebSearchServer {
   }
 }
 
-function citeToUrl(text: string): string {
-  if (!text) return "";
-  try {
-    const url = text.replace(/\s*›\s*/g, "/").replace(/\s+/g, "");
-    new URL(url);
-    return url;
-  } catch {
-    return "";
-  }
-}
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = new WebSearchServer();

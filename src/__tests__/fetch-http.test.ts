@@ -19,6 +19,7 @@ function createFetcher(overrides?: {
   const cache = new SemanticCache(createMockEmbedding(), new InMemoryVectorStore());
   const defaultContext = {
     newPage: async () => ({
+      route: async () => undefined,
       goto: async () => undefined,
       close: async () => undefined,
     }),
@@ -36,7 +37,14 @@ function createFetcher(overrides?: {
 }
 
 describe("ContentFetcher", () => {
+  const originalForcePlaywright = process.env.FORCE_PLAYWRIGHT;
+
   afterEach(() => {
+    if (originalForcePlaywright === undefined) {
+      delete process.env.FORCE_PLAYWRIGHT;
+    } else {
+      process.env.FORCE_PLAYWRIGHT = originalForcePlaywright;
+    }
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -96,6 +104,51 @@ describe("ContentFetcher", () => {
     expect(result?.fullText).toContain("# Test");
   });
 
+  it("treats FORCE_PLAYWRIGHT=false as HTTP-first mode", async () => {
+    process.env.FORCE_PLAYWRIGHT = "false";
+    const { fetcher } = createFetcher({
+      getBrowserContext: async () => {
+        throw new Error("Playwright should not be used");
+      },
+    });
+    const html = `<html><head><title>HTTP</title></head><body><article><p>${"content ".repeat(80)}</p></article></body></html>`;
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(html, {
+        status: 200,
+        headers: { "content-type": "text/html; charset=utf-8" },
+      })
+    ));
+
+    const result = await fetcher.fetchContent("https://example.com/http");
+
+    expect(result.kind).toBe("content");
+    if (result.kind === "content") {
+      expect(result.source).toBe("http");
+      expect(result.text).toContain("# HTTP");
+    }
+  });
+
+  it("blocks HTTP redirects to private network targets", async () => {
+    const { fetcher } = createFetcher({
+      getBrowserContext: async () => {
+        throw new Error("Playwright should not be used after a blocked redirect");
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      new Response(null, {
+        status: 302,
+        headers: { location: "http://127.0.0.1/private" },
+      })
+    ));
+
+    const result = await fetcher.fetchContent("https://example.com/redirect", true);
+
+    expect(result).toEqual({
+      kind: "error",
+      reason: "blocked_url",
+    });
+  });
+
   it("prefers content cache when force_refresh is false", async () => {
     const { cache, fetcher } = createFetcher();
     await cache.setCachedContent("https://example.com/cached", "# Cached\n\nBody", "Cached");
@@ -114,6 +167,7 @@ describe("ContentFetcher", () => {
 
   it("falls back to Playwright when HTTP fetch cannot produce an article", async () => {
     const page = {
+      route: vi.fn().mockResolvedValue(undefined),
       goto: vi.fn().mockResolvedValue({
         body: async () => Buffer.from(`<html><head><title>Rendered</title></head><body><article><p>${"rendered ".repeat(80)}</p></article></body></html>`),
       }),

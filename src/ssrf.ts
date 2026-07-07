@@ -1,6 +1,10 @@
 import { promises as dns } from "dns";
 import { isIP } from "net";
 
+export type UrlSafetyResult =
+  | { ok: true; url: URL }
+  | { ok: false; reason: "invalid_url" | "unsupported_protocol" | "private_host"; hostname?: string };
+
 export function isPrivateIP(ip: string): boolean {
   let addr = ip;
   if (addr.startsWith("::ffff:")) {
@@ -46,4 +50,28 @@ export async function isPrivateHost(hostname: string): Promise<boolean> {
   }
 
   return false;
+}
+
+export function isSupportedFetchProtocol(protocol: string): boolean {
+  return protocol === "http:" || protocol === "https:";
+}
+
+export async function validatePublicHttpUrl(rawUrl: string): Promise<UrlSafetyResult> {
+  let parsed: URL;
+
+  try {
+    parsed = new URL(rawUrl);
+  } catch {
+    return { ok: false, reason: "invalid_url" };
+  }
+
+  if (!isSupportedFetchProtocol(parsed.protocol)) {
+    return { ok: false, reason: "unsupported_protocol", hostname: parsed.hostname };
+  }
+
+  if (await isPrivateHost(parsed.hostname)) {
+    return { ok: false, reason: "private_host", hostname: parsed.hostname };
+  }
+
+  return { ok: true, url: parsed };
 }
