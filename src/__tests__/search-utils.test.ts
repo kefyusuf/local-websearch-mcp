@@ -2,7 +2,9 @@ import { describe, expect, it } from "vitest";
 import {
   decodeBingUrl,
   decodeDuckDuckGoUrl,
+  filterSearchResultsByDomain,
   inferSearchLocale,
+  normalizeDomainFilter,
   parseBingResults,
   parseBraveResults,
   parseDuckDuckGoResults,
@@ -11,6 +13,21 @@ import {
 } from "../search-utils.js";
 
 describe("search-utils", () => {
+  it("normalizes domain filters", () => {
+    expect(normalizeDomainFilter("https://www.react.dev/reference")).toBe("react.dev");
+    expect(normalizeDomainFilter("www.github.com")).toBe("github.com");
+  });
+
+  it("filters results by exact domains and subdomains", () => {
+    const results = filterSearchResultsByDomain([
+      { title: "React", url: "https://react.dev/reference", snippet: "Docs", source: "test" },
+      { title: "Blog", url: "https://engineering.react.dev/post", snippet: "Post", source: "test" },
+      { title: "Other", url: "https://example.com/react", snippet: "Other", source: "test" },
+    ], "react.dev");
+
+    expect(results.map((result) => result.title)).toEqual(["React", "Blog"]);
+  });
+
   it("should infer Turkish locale for Turkish finance queries", () => {
     const locale = inferSearchLocale("alt\u0131n fiyat\u0131");
     expect(locale.market).toBe("tr-TR");

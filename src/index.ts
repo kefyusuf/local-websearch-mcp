@@ -20,6 +20,8 @@ import type { SearchProvider } from "./providers/base.js";
 import { ProviderHealthTracker } from "./providers/health.js";
 import { buildProviders } from "./providers/registry.js";
 import {
+  filterSearchResultsByDomain,
+  normalizeDomainFilter,
   resolveSearchLocale,
   type SearchLocale,
 } from "./search-utils.js";
@@ -31,6 +33,7 @@ export const SearchSchema = z.object({
   query: z.string().min(1).describe("The search query to perform"),
   deep: z.boolean().optional().describe("If true, fetch the top result pages and extract a direct answer. If false (default), return a ranked list of results quickly without page fetching."),
   max_results: z.number().int().min(1).max(10).optional().describe("Maximum number of results to return (1-10, default 5)."),
+  domain: z.string().min(1).optional().describe("Optional domain filter, for example react.dev or github.com."),
 });
 
 const FetchSchema = z.object({
@@ -167,13 +170,14 @@ export class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return results. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
+          description: "Search the web and return results. Use domain to restrict results to a site. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
           inputSchema: {
             type: "object",
             properties: {
               query: { type: "string", description: "The search query" },
               deep: { type: "boolean", description: "Fetch pages and extract answer (default: false)" },
               max_results: { type: "number", description: "Number of results to return, 1-10 (default: 5)" },
+              domain: { type: "string", description: "Optional domain filter, for example react.dev or github.com" },
             },
             required: ["query"],
           },
@@ -237,11 +241,14 @@ export class WebSearchServer {
       };
     }
 
-    const { query, deep = false, max_results = 5 } = SearchSchema.parse(args);
+    const { query, deep = false, max_results = 5, domain } = SearchSchema.parse(args);
+    const normalizedDomain = normalizeDomainFilter(domain);
+    const providerQuery = normalizedDomain ? `${query} site:${normalizedDomain}` : query;
+    const cacheKey = normalizedDomain ? `${query} domain:${normalizedDomain}` : query;
     const queryLocale = resolveSearchLocale(query, this.crossLingual
       ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
       : "eng_Latn");
-    const cached = await this.cache.get(query);
+    const cached = await this.cache.get(cacheKey);
 
     if (cached !== null && cached.length > 0) {
       console.error(`Semantic cache hit for query: ${query}`);
@@ -255,16 +262,19 @@ export class WebSearchServer {
     }
 
     // Search across configured providers
-    const results = await this.executeProviderSearch(query, queryLocale);
+    const rawResults = await this.executeProviderSearch(providerQuery, queryLocale);
+    const results = filterSearchResultsByDomain(rawResults, normalizedDomain);
 
     if (results.length === 0) {
       return {
-        content: [{ type: "text", text: "Web search is currently unavailable (all providers returned no results). Try using fetch_content with a direct URL instead, or retry the search later." }],
+        content: [{ type: "text", text: normalizedDomain
+          ? `No results matched the domain filter "${normalizedDomain}". Try a broader search or fetch_content with a direct URL.`
+          : "Web search is currently unavailable (all providers returned no results). Try using fetch_content with a direct URL instead, or retry the search later." }],
         isError: true,
       };
     }
 
-    await this.cache.set(query, results);
+    await this.cache.set(cacheKey, results);
     if (!deep) {
       const reranked = await this.cache.reRankResults(query, results, max_results);
       return {

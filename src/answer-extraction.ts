@@ -113,9 +113,58 @@ export function formatSearchResults(query: string, results: SearchResultItem[]):
     summary = `Version hint from search snippets: ${labelText}.\n\n`;
   }
 
-  const formatted = results.map((result, i) =>
-    `${i + 1}. "${result.title}" - ${result.url}\n   ${result.snippet || "(no description)"}`
-  ).join("\n\n");
+  const formatted = results.map((result, i) => {
+    const freshnessHint = formatFreshnessHint(`${result.title} ${result.snippet}`);
+    return `${i + 1}. "${result.title}" - ${result.url}\n   ${result.snippet || "(no description)"}${freshnessHint ? `\n   ${freshnessHint}` : ""}`;
+  }).join("\n\n");
 
   return summary + formatted;
+}
+
+function formatFreshnessHint(text: string): string {
+  const dateHint = extractDateHint(text);
+  if (!dateHint) return "";
+
+  const parsedDate = new Date(dateHint);
+  if (Number.isNaN(parsedDate.getTime())) return "";
+
+  const ageMonths = monthDelta(parsedDate, new Date());
+  if (ageMonths <= 24) return "";
+
+  return `Freshness: possibly stale (${dateHint}).`;
+}
+
+function extractDateHint(text: string): string | null {
+  const absolutePatterns = [
+    /\b(\d{4}-\d{2}-\d{2})\b/,
+    /\b((?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:tember)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\s+\d{1,2},?\s+\d{4})\b/i,
+  ];
+
+  for (const pattern of absolutePatterns) {
+    const match = text.match(pattern);
+    if (match) return normalizeDateHint(match[1]);
+  }
+
+  const relativeMatch = text.match(/\b(\d+)\s+(month|year)s?\s+ago\b/i);
+  if (!relativeMatch) return null;
+
+  const amount = Number(relativeMatch[1]);
+  const unit = relativeMatch[2].toLowerCase();
+  const date = new Date();
+  if (unit.startsWith("month")) {
+    date.setMonth(date.getMonth() - amount);
+  } else {
+    date.setFullYear(date.getFullYear() - amount);
+  }
+
+  return date.toISOString().slice(0, 10);
+}
+
+function normalizeDateHint(value: string): string {
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? value : parsed.toISOString().slice(0, 10);
+}
+
+function monthDelta(from: Date, to: Date): number {
+  return (to.getFullYear() - from.getFullYear()) * 12 + (to.getMonth() - from.getMonth());
 }

@@ -33,6 +33,40 @@ function isLikelyUrl(value: string): boolean {
   }
 }
 
+export function normalizeDomainFilter(domain: string | undefined): string | undefined {
+  if (!domain) return undefined;
+  const trimmed = domain.trim().toLowerCase();
+  if (!trimmed) return undefined;
+
+  try {
+    return new URL(trimmed.includes("://") ? trimmed : `https://${trimmed}`).hostname.replace(/^www\./, "");
+  } catch {
+    return trimmed.replace(/^www\./, "").replace(/\/.*$/, "");
+  }
+}
+
+export function domainMatches(hostname: string, domain: string | undefined): boolean {
+  if (!domain) return true;
+  const normalizedHost = hostname.toLowerCase().replace(/^www\./, "");
+  const normalizedDomain = normalizeDomainFilter(domain);
+  if (!normalizedDomain) return true;
+
+  return normalizedHost === normalizedDomain || normalizedHost.endsWith(`.${normalizedDomain}`);
+}
+
+export function filterSearchResultsByDomain(results: SearchResultItem[], domain: string | undefined): SearchResultItem[] {
+  const normalizedDomain = normalizeDomainFilter(domain);
+  if (!normalizedDomain) return results;
+
+  return results.filter((result) => {
+    try {
+      return domainMatches(new URL(result.url).hostname, normalizedDomain);
+    } catch {
+      return false;
+    }
+  });
+}
+
 function localeFromLanguageLabel(language: string): SearchLocale | null {
   const primary = language.split("_")[0]?.toLowerCase();
 

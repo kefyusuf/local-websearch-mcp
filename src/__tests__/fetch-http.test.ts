@@ -104,6 +104,64 @@ describe("ContentFetcher", () => {
     expect(result?.fullText).toContain("# Test");
   });
 
+  it("fetches GitHub blob URLs through raw Markdown before browser fallback", async () => {
+    const { fetcher } = createFetcher({
+      getBrowserContext: async () => {
+        throw new Error("Playwright should not be used for GitHub raw content");
+      },
+    });
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      expect(String(input)).toBe("https://raw.githubusercontent.com/owner/repo/main/README.md");
+      return new Response("# Project Title\n\nThis package provides local web search tools.", {
+        status: 200,
+        headers: { "content-type": "text/plain; charset=utf-8" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchSpy);
+
+    const result = await fetcher.fetchContent("https://github.com/owner/repo/blob/main/README.md", true);
+
+    expect(result.kind).toBe("content");
+    if (result.kind === "content") {
+      expect(result.source).toBe("github-raw");
+      expect(result.text).toContain("# Project Title");
+      expect(result.text).toContain("local web search tools");
+    }
+  });
+
+  it("fetches RSS feeds as Markdown lists before browser fallback", async () => {
+    const { fetcher } = createFetcher({
+      getBrowserContext: async () => {
+        throw new Error("Playwright should not be used for RSS content");
+      },
+    });
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(`
+      <rss>
+        <channel>
+          <title>Example Feed</title>
+          <item>
+            <title>First Post</title>
+            <link>https://example.com/first</link>
+            <description>First post summary.</description>
+          </item>
+        </channel>
+      </rss>
+    `, {
+      status: 200,
+      headers: { "content-type": "application/rss+xml" },
+    })));
+
+    const result = await fetcher.fetchContent("https://example.com/blog", true);
+
+    expect(result.kind).toBe("content");
+    if (result.kind === "content") {
+      expect(result.source).toBe("rss");
+      expect(result.text).toContain("# Example Feed");
+      expect(result.text).toContain("1. First Post");
+      expect(result.text).toContain("https://example.com/first");
+    }
+  });
+
   it("treats FORCE_PLAYWRIGHT=false as HTTP-first mode", async () => {
     process.env.FORCE_PLAYWRIGHT = "false";
     const { fetcher } = createFetcher({

@@ -6,7 +6,8 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 
 - Browser context pooling with a persistent Playwright browser instance.
 - Web search through configurable providers with health tracking and fallback.
-- HTTP-first page fetching with Playwright fallback for rendered pages.
+- Domain-filtered web search for targeted site queries.
+- HTTP-first page fetching with GitHub Raw and RSS fast paths plus Playwright fallback for rendered pages.
 - SSRF protection for `fetch_content` by blocking localhost and private network targets.
 - Token-bucket rate limiting for search and fetch tools.
 - Semantic cache backed by SQLite and `sqlite-vec`.
@@ -73,11 +74,29 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 | Tool | Description |
 | --- | --- |
-| `web_search` | Searches the web and returns ranked results. Set `deep=true` to fetch top result pages and extract a source-backed text answer. |
-| `fetch_content` | Fetches a URL and returns clean Markdown with content caching and charset handling. |
+| `web_search` | Searches the web and returns ranked results. Set `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
+| `fetch_content` | Fetches a URL and returns clean Markdown with content caching, charset handling, GitHub Raw fast paths, RSS feed extraction, and Playwright fallback. |
 | `server_status` | Returns provider availability, cache stats, browser state, feature flags, and uptime. |
 
-Use regular `web_search` for fast ranked links and snippets. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+Use regular `web_search` for fast ranked links and snippets. Use `domain` for targeted searches such as `react.dev` or `github.com`. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+
+Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
+
+Example targeted search arguments:
+
+```json
+{
+  "query": "server components reference",
+  "domain": "react.dev",
+  "max_results": 5
+}
+```
+
+`fetch_content` uses fast source-specific paths before opening a browser:
+
+- GitHub repository, blob, tree, and raw URLs are read from `raw.githubusercontent.com` when possible.
+- RSS or Atom feed URLs, plus common blog/news feed paths, are converted into a Markdown list of recent items.
+- Regular HTML pages still use HTTP-first Readability parsing with Playwright fallback.
 
 ## Configuration
 
