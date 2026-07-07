@@ -103,12 +103,11 @@ try {
   }
 
   clearTimeout(timeout);
-  child.kill();
-  await once(child, "exit").catch(() => undefined);
+  await stopServer();
   rmSync(smokeDir, { recursive: true, force: true });
   console.log(`MCP smoke passed: ${toolNames.join(", ")}`);
 } catch (error) {
-  child.kill();
+  await stopServer();
   fail(error instanceof Error ? error.message : String(error));
 }
 
@@ -138,6 +137,24 @@ function assertNoError(response, label) {
 function assertIncludes(values, expected, label) {
   if (!values.includes(expected)) {
     fail(`${label} missing ${expected}; got ${values.join(", ")}`);
+  }
+}
+
+async function stopServer() {
+  if (child.exitCode !== null || child.signalCode !== null) {
+    return;
+  }
+
+  child.kill("SIGTERM");
+
+  const exited = await Promise.race([
+    once(child, "exit").then(() => true),
+    new Promise((resolve) => setTimeout(() => resolve(false), 1_000)),
+  ]);
+
+  if (!exited) {
+    child.kill("SIGKILL");
+    await once(child, "exit").catch(() => undefined);
   }
 }
 
