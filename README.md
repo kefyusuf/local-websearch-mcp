@@ -11,7 +11,6 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 - Token-bucket rate limiting for search and fetch tools.
 - Semantic cache backed by SQLite and `sqlite-vec`.
 - Optional cross-lingual query expansion with local Transformers.js models.
-- Optional Ollama integration for local LLM answer extraction.
 - Clean Markdown extraction through Readability, JSDOM, and Turndown.
 
 ## Requirements
@@ -71,9 +70,6 @@ Add the built server to your MCP client config:
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
 | `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
 | `CACHE_CLEANUP_INTERVAL_HOURS` | `24` | Interval for expired content cache cleanup. |
-| `ENABLE_OLLAMA` | `false` | Enables local Ollama summarization for deep search answers. |
-| `OLLAMA_URL` | `http://localhost:11434` | Ollama server URL. |
-| `OLLAMA_MODEL` | `llama3.2` | Ollama model name. |
 
 ## Docker
 

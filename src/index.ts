@@ -13,7 +13,6 @@ import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
 import { SemanticCache } from "./cache/semantic-cache.js";
 import { CrossLingualEngine } from "./cache/crosslingual.js";
-import { OllamaClient } from "./llm/ollama.js";
 import type { SearchResultItem } from "./cache/types.js";
 import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./rate-limiter.js";
 import type { SearchProvider } from "./providers/base.js";
@@ -68,7 +67,6 @@ export class WebSearchServer {
   private providers: SearchProvider[] = [];
   private healthTracker = new ProviderHealthTracker();
   private enableCrosslingual: boolean;
-  private ollamaClient: OllamaClient | null = null;
   private contentFetcher: ContentFetcher;
   private readonly startedAt = Date.now();
 
@@ -98,19 +96,6 @@ export class WebSearchServer {
       const deleted = this.cache.deleteExpiredContent();
       if (deleted > 0) console.error(`Cache cleanup: removed ${deleted} expired content entries`);
     }, cleanupIntervalMs).unref();
-
-    if (getEnvBool("ENABLE_OLLAMA", false)) {
-      this.ollamaClient = new OllamaClient(
-        getEnv("OLLAMA_URL", "http://localhost:11434"),
-        getEnv("OLLAMA_MODEL", "llama3.2")
-      );
-      console.error(
-        "Ollama integration enabled: " +
-          getEnv("OLLAMA_URL", "http://localhost:11434") +
-          " model=" +
-          getEnv("OLLAMA_MODEL", "llama3.2")
-      );
-    }
 
     if (this.enableCrosslingual) {
       this.crossLingual = new CrossLingualEngine();
@@ -297,18 +282,7 @@ export class WebSearchServer {
     if (validPages.length > 0) {
       const combinedContent = validPages.map((page) => `# ${page.title}\n${page.content}`).join("\n\n---\n\n");
       const sourceUrls = validPages.map((page) => page.url);
-      let answer: string;
-      if (this.ollamaClient) {
-        const ollamaAnswer = await this.ollamaClient.summarize(combinedContent, query);
-        if (ollamaAnswer) {
-          const sources = sourceUrls.map((url, i) => `Source ${i + 1}: ${url}`).join("\n");
-          answer = `Answer: ${ollamaAnswer}\n\n${sources}`;
-        } else {
-          answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
-        }
-      } else {
-        answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
-      }
+      const answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
       return {
         content: [{ type: "text", text: answer }],
       };
@@ -408,7 +382,6 @@ export class WebSearchServer {
       cache: cacheStats,
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
-      ollama: this.ollamaClient ? "enabled" : "disabled",
       uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
     };
     return {
