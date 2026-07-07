@@ -1,6 +1,6 @@
 # Local Web Search MCP Server
 
-Offline-first MCP server for web search and content fetching. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, and direct-answer extraction.
+Offline-first MCP server for web search and content fetching. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, and extractive deep-search answers.
 
 ## Features
 
@@ -26,7 +26,7 @@ npm install
 npm run build
 ```
 
-The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache.
+The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache. Keep `ENABLE_CROSSLINGUAL=false` for the lightest first run.
 
 ## MCP Client Configuration
 
@@ -42,7 +42,7 @@ Add the built server to your MCP client config:
         "RATE_LIMIT_SEARCH_PER_MIN": "10",
         "RATE_LIMIT_FETCH_PER_MIN": "20",
         "SEARCH_PROVIDERS": "duckduckgo,bing",
-        "ENABLE_CROSSLINGUAL": "true",
+        "ENABLE_CROSSLINGUAL": "false",
         "CACHE_DB_PATH": "websearch_cache.db"
       }
     }
@@ -50,13 +50,34 @@ Add the built server to your MCP client config:
 }
 ```
 
+If the package is installed globally or through a package runner, use the binary entrypoint:
+
+```json
+{
+  "mcpServers": {
+    "websearch": {
+      "command": "local-websearch-mcp",
+      "args": [],
+      "env": {
+        "SEARCH_PROVIDERS": "duckduckgo,bing",
+        "ENABLE_CROSSLINGUAL": "false"
+      }
+    }
+  }
+}
+```
+
+For package-runner based clients, the command can be `npx` with `args` set to `["-y", "local-websearch-mcp"]` once the package is available from the configured npm registry.
+
 ## Tools
 
 | Tool | Description |
 | --- | --- |
-| `web_search` | Searches the web and returns ranked results. Set `deep=true` to fetch top result pages and extract a direct answer. |
+| `web_search` | Searches the web and returns ranked results. Set `deep=true` to fetch top result pages and extract a source-backed text answer. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with content caching and charset handling. |
 | `server_status` | Returns provider availability, cache stats, browser state, feature flags, and uptime. |
+
+Use regular `web_search` for fast ranked links and snippets. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
 
 ## Configuration
 
@@ -65,7 +86,7 @@ Add the built server to your MCP client config:
 | `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
 | `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
 | `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider order. Supported values: `duckduckgo`, `bing`, `brave`, `google`. |
-| `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. `.env.example` enables it for richer local behavior. |
+| `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
 | `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
@@ -86,9 +107,20 @@ Docker Compose stores the SQLite cache in a named volume mounted at `/app/data` 
 npm run build
 npm run typecheck
 npm test
+npm run smoke:mcp
 npm audit --audit-level=moderate
 npm pack --dry-run --json
 ```
+
+`npm run smoke:mcp` starts the compiled server over stdio, verifies `tools/list`, calls `server_status`, and confirms that `fetch_content` blocks localhost.
+
+## Troubleshooting
+
+- If startup fails after install, run `npx playwright install chromium`.
+- If the first model-backed request is slow, wait for the Transformers.js model download to finish and retry.
+- If search returns no results, change `SEARCH_PROVIDERS` order or try a direct `fetch_content` URL.
+- If Docker cannot find Chromium, rebuild the image with `npm run docker:build`.
+- If cache files appear in the project root, set `CACHE_DB_PATH` to a dedicated data directory.
 
 ## npm Packaging
 

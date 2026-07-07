@@ -24,6 +24,12 @@ jobs:
 
       - run: npm run build
 
+      - run: npm run typecheck
+
       - run: npm test
 
-      - run: npx tsc --noEmit
+      - run: npm run smoke:mcp
+
+      - run: npm audit --audit-level=moderate
+
+      - run: npm pack --dry-run --json
