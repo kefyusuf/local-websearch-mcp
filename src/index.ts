@@ -71,6 +71,8 @@ export class WebSearchServer {
   private providers: SearchProvider[] = [];
   private healthTracker = new ProviderHealthTracker();
   private enableCrosslingual: boolean;
+  private fetchWaitUntil: "domcontentloaded" | "networkidle";
+  private cacheDbPath: string;
   private contentFetcher: ContentFetcher;
   private readonly startedAt = Date.now();
 
@@ -88,11 +90,12 @@ export class WebSearchServer {
     );
 
     this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
-    const fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
+    this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
+    this.cacheDbPath = getEnv("CACHE_DB_PATH", "websearch_cache.db");
 
     // Initialize Semantic Cache with SQLite for persistence
     const embeddingProvider = new TransformersEmbeddingProvider();
-    const vectorStore = new SQLiteVectorStore(getEnv("CACHE_DB_PATH", "websearch_cache.db"));
+    const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
     this.cache = new SemanticCache(embeddingProvider, vectorStore);
     const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
     const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
@@ -110,7 +113,7 @@ export class WebSearchServer {
     this.contentFetcher = new ContentFetcher({
       cache: this.cache,
       getBrowserContext: () => this.getBrowserContext(),
-      fetchWaitUntil,
+      fetchWaitUntil: this.fetchWaitUntil,
       detectIntent: this.enableCrosslingual
         ? (text) => this.cache.detectIntent(text)
         : null,
@@ -223,12 +226,27 @@ export class WebSearchServer {
           };
         }
       } catch (error: unknown) {
+        if (error instanceof z.ZodError) {
+          return {
+            content: [{ type: "text", text: `Invalid arguments: ${error.issues.map((issue) => issue.message).join("; ")}` }],
+            isError: true,
+          };
+        }
+
         return {
           content: [{ type: "text", text: `Internal error: ${error instanceof Error ? error.message : String(error)}` }],
           isError: true,
         };
       }
     });
+  }
+
+  overrideSearchProvidersForTesting(providers: SearchProvider[]): void {
+    if (process.env.NODE_ENV !== "test") {
+      throw new Error("overrideSearchProvidersForTesting is only available during tests");
+    }
+    this.providers = providers;
+    this.healthTracker = new ProviderHealthTracker();
   }
 
   private async handleSearch(args: unknown) {
@@ -389,11 +407,17 @@ export class WebSearchServer {
     const status = {
       providers: this.providers.map((provider) => ({
         name: provider.name,
-        available: this.healthTracker.isAvailable(provider.name),
+        ...this.healthTracker.getSnapshot(provider.name),
       })),
       cache: cacheStats,
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
+      config: {
+        searchProviders: this.providers.map((provider) => provider.name),
+        fetchWaitUntil: this.fetchWaitUntil,
+        forcePlaywright: getEnvBool("FORCE_PLAYWRIGHT", false),
+        cacheDbPath: this.cacheDbPath,
+      },
       uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
     };
     return {

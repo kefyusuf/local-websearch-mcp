@@ -1,3 +1,12 @@
+export type ProviderHealthSnapshot = {
+  available: boolean;
+  recentAttempts: number;
+  recentSuccesses: number;
+  recentFailures: number;
+  successRate: number | null;
+  backoffRemainingMs: number;
+};
+
 export class ProviderHealthTracker {
   history = new Map<string, boolean[]>();
   backoffUntil = new Map<string, number>();
@@ -37,5 +46,23 @@ export class ProviderHealthTracker {
 
     this.backoffUntil.delete(name);
     return true;
+  }
+
+  getSnapshot(name: string): ProviderHealthSnapshot {
+    const attempts = this.history.get(name) ?? [];
+    const recentSuccesses = attempts.filter(Boolean).length;
+    const backoffUntil = this.backoffUntil.get(name);
+    const backoffRemainingMs = backoffUntil === undefined
+      ? 0
+      : Math.max(0, backoffUntil - Date.now());
+
+    return {
+      available: this.isAvailable(name),
+      recentAttempts: attempts.length,
+      recentSuccesses,
+      recentFailures: attempts.length - recentSuccesses,
+      successRate: attempts.length > 0 ? recentSuccesses / attempts.length : null,
+      backoffRemainingMs,
+    };
   }
 }

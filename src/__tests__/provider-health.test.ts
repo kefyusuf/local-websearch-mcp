@@ -19,6 +19,14 @@ describe("ProviderHealthTracker", () => {
     }
 
     expect(tracker.isAvailable("duckduckgo")).toBe(false);
+    expect(tracker.getSnapshot("duckduckgo")).toMatchObject({
+      available: false,
+      recentAttempts: 5,
+      recentSuccesses: 0,
+      recentFailures: 5,
+      successRate: 0,
+      backoffRemainingMs: 2 * 60 * 1000,
+    });
   });
 
   it("does not trigger backoff with 3 successes out of 5", () => {
