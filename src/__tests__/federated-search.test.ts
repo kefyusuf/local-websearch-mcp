@@ -28,6 +28,22 @@ describe("federated search", () => {
       .toBe("https://example.com/docs?a=1&b=2");
   });
 
+  it("preserves SPA route fragments while dropping ordinary document anchors", () => {
+    expect(normalizeSearchUrl("https://example.com/#/article-a"))
+      .toBe("https://example.com/#/article-a");
+    expect(normalizeSearchUrl("https://example.com/#!/article-b"))
+      .toBe("https://example.com/#!/article-b");
+    expect(normalizeSearchUrl("https://example.com/docs#intro"))
+      .toBe("https://example.com/docs");
+  });
+
+  it("preserves repeated query-parameter value order while sorting distinct keys", () => {
+    expect(normalizeSearchUrl("https://example.com/search?b=2&id=primary&id=fallback&a=1"))
+      .toBe("https://example.com/search?a=1&b=2&id=primary&id=fallback");
+    expect(normalizeSearchUrl("https://example.com/search?b=2&id=fallback&id=primary&a=1"))
+      .toBe("https://example.com/search?a=1&b=2&id=fallback&id=primary");
+  });
+
   it("fuses duplicate URLs across providers, preserves the representative URL, and records provider ranks", () => {
     const fused = fuseSearchResults([
       {
