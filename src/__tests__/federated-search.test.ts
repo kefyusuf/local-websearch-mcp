@@ -28,7 +28,7 @@ describe("federated search", () => {
       .toBe("https://example.com/docs?a=1&b=2");
   });
 
-  it("fuses duplicate URLs across providers and records provider ranks", () => {
+  it("fuses duplicate URLs across providers, preserves the representative URL, and records provider ranks", () => {
     const fused = fuseSearchResults([
       {
         provider: "brave",
@@ -48,7 +48,7 @@ describe("federated search", () => {
 
     expect(fused).toHaveLength(3);
     expect(fused[0]).toMatchObject({
-      url: "https://example.com/a",
+      url: "https://example.com/a?utm_source=brave",
       sources: ["brave", "google"],
       providerRanks: { brave: 1, google: 1 },
     });
@@ -94,7 +94,7 @@ describe("federated search", () => {
     expect(google.execute).toHaveBeenCalledTimes(1);
     expect(results).toHaveLength(3);
     expect(results[0]).toMatchObject({
-      url: "https://example.com/shared",
+      url: "https://example.com/shared?utm_source=brave",
       sources: ["brave", "google"],
       providerRanks: { brave: 1, google: 1 },
     });
