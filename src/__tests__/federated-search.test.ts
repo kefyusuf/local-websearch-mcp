@@ -99,4 +99,21 @@ describe("federated search", () => {
       providerRanks: { brave: 1, google: 1 },
     });
   });
+
+  it("executes each provider name only once in aggregate mode", async () => {
+    const brave = provider("brave", ["https://example.com/brave"]);
+
+    const results = await executeProviderSearch({
+      providers: [brave, brave],
+      query: "postgres pooling",
+      locale,
+      strategy: "aggregate",
+      healthTracker: new ProviderHealthTracker(),
+    });
+
+    expect(brave.execute).toHaveBeenCalledTimes(1);
+    expect(results).toHaveLength(1);
+    expect(results[0].sources).toEqual(["brave"]);
+    expect(results[0].fusionScore).toBeCloseTo(1 / 61);
+  });
 });
