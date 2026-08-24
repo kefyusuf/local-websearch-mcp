@@ -119,9 +119,8 @@ describe("WebSearchServer auto routing", () => {
       detect: vi.fn(async () => ({ intent: "technical" as const, source: "classifier" as const })),
     };
 
-    const server = new WebSearchServer();
+    const server = new WebSearchServer(detector);
     server.overrideSearchProvidersForTesting([duckduckgo, bing, brave, google]);
-    server.overrideSearchIntentDetectorForTesting(detector);
 
     const cache = (server as unknown as { cache: {
       get: (...args: unknown[]) => Promise<unknown>;
@@ -157,9 +156,8 @@ describe("WebSearchServer auto routing", () => {
     const detector = {
       detect: vi.fn(async () => ({ intent: "news" as const, source: "classifier" as const })),
     };
-    const server = new WebSearchServer();
+    const server = new WebSearchServer(detector);
     server.overrideSearchProvidersForTesting([bing]);
-    server.overrideSearchIntentDetectorForTesting(detector);
 
     const cache = (server as unknown as { cache: {
       get: (query: string) => Promise<unknown>;
