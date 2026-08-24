@@ -1,4 +1,4 @@
-import { pipeline } from "@xenova/transformers";
+import { pipeline } from "@huggingface/transformers";
 import { TranslationResult, ClassificationResult } from "./types.js";
 
 const OPUS_MT_REGISTRY: Record<string, string> = {

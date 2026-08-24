@@ -1,9 +1,9 @@
 import { describe, it, expect, vi } from "vitest";
 
-// We mock transformers to avoid loading actual models
-vi.mock("@xenova/transformers", () => {
-  const mockPipeline = vi.fn(async (task: string, model: string) => {
-    return async (text: string, options?: any) => {
+// Mock Transformers.js to avoid loading actual models during unit tests.
+vi.mock("@huggingface/transformers", () => {
+  const mockPipeline = vi.fn(async (_task: string, _model: string) => {
+    return async (_text: string, _options?: any) => {
       return { data: new Float32Array(384).fill(0.1) };
     };
   });
@@ -27,7 +27,7 @@ describe("TransformersEmbeddingProvider", () => {
   });
 
   it("should return empty array when extractor fails", async () => {
-    vi.mocked(await import("@xenova/transformers")).pipeline.mockRejectedValueOnce(new Error("Load failed"));
+    vi.mocked(await import("@huggingface/transformers")).pipeline.mockRejectedValueOnce(new Error("Load failed"));
     const provider = new TransformersEmbeddingProvider();
     const embedding = await provider.getEmbedding("hello");
     expect(embedding).toEqual([]);
