@@ -3,6 +3,7 @@ import type { SearchProvider } from "../providers/base.js";
 import type { ProviderHealthTracker } from "../providers/health.js";
 import type { SearchLocale } from "../search-utils.js";
 import { fuseSearchResults } from "./fusion.js";
+import type { SearchPlan } from "./planner.js";
 
 export type SearchStrategy = "fallback" | "aggregate";
 
@@ -11,6 +12,14 @@ export type ExecuteProviderSearchOptions = {
   query: string;
   locale: SearchLocale;
   strategy: SearchStrategy;
+  healthTracker: ProviderHealthTracker;
+};
+
+export type ExecuteSearchPlanOptions = {
+  providers: SearchProvider[];
+  query: string;
+  locale: SearchLocale;
+  plan: SearchPlan;
   healthTracker: ProviderHealthTracker;
 };
 
@@ -30,6 +39,20 @@ function uniqueProvidersByName(providers: SearchProvider[]): SearchProvider[] {
     seen.add(provider.name);
     return true;
   });
+}
+
+function providersInPlanOrder(
+  providers: SearchProvider[],
+  providerNames: string[],
+): SearchProvider[] {
+  const byName = new Map<string, SearchProvider>();
+  for (const provider of providers) {
+    if (!byName.has(provider.name)) byName.set(provider.name, provider);
+  }
+
+  return providerNames
+    .map((name) => byName.get(name))
+    .filter((provider): provider is SearchProvider => provider !== undefined);
 }
 
 async function runProvider(
@@ -96,4 +119,38 @@ export async function executeProviderSearch({
   return fuseSearchResults(
     settled.filter(({ results }) => results.length > 0)
   );
+}
+
+export async function executeSearchPlan({
+  providers,
+  query,
+  locale,
+  plan,
+  healthTracker,
+}: ExecuteSearchPlanOptions): Promise<SearchResultItem[]> {
+  const primaryProviders = providersInPlanOrder(providers, plan.primaryProviderNames);
+  const primaryResults = await executeProviderSearch({
+    providers: primaryProviders,
+    query,
+    locale,
+    strategy: plan.strategy,
+    healthTracker,
+  });
+
+  if (
+    plan.strategy === "fallback" ||
+    primaryResults.length > 0 ||
+    plan.fallbackProviderNames.length === 0
+  ) {
+    return primaryResults;
+  }
+
+  const fallbackProviders = providersInPlanOrder(providers, plan.fallbackProviderNames);
+  return executeProviderSearch({
+    providers: fallbackProviders,
+    query,
+    locale,
+    strategy: "fallback",
+    healthTracker,
+  });
 }
