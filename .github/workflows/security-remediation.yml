@@ -9,6 +9,7 @@ permissions:
 
 jobs:
   refresh-lockfile:
+    # One-shot branch workflow. Bot commits do not recursively trigger remediation.
     if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
 
