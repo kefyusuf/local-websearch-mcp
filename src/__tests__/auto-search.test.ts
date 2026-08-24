@@ -1,4 +1,5 @@
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { WebSearchServer } from "../index.js";
 import type { SearchProvider } from "../providers/base.js";
 import { ProviderHealthTracker } from "../providers/health.js";
 import { executeSearchPlan } from "../search/executor.js";
@@ -98,3 +99,85 @@ describe("planned search execution", () => {
     expect(duckduckgo.execute).not.toHaveBeenCalled();
   });
 });
+
+describe("WebSearchServer auto routing", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it("classifies the original query, routes primary providers, and bypasses semantic query cache", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("CACHE_DB_PATH", ":memory:");
+    vi.stubEnv("ENABLE_CROSSLINGUAL", "false");
+
+    const duckduckgo = provider("duckduckgo", ["https://react.dev/ddg"]);
+    const bing = provider("bing", ["https://react.dev/bing"]);
+    const brave = provider("brave", ["https://react.dev/brave"]);
+    const google = provider("google", ["https://react.dev/google"]);
+    const detector = {
+      detect: vi.fn(async () => ({ intent: "technical" as const, source: "classifier" as const })),
+    };
+
+    const server = new WebSearchServer();
+    server.overrideSearchProvidersForTesting([duckduckgo, bing, brave, google]);
+    server.overrideSearchIntentDetectorForTesting(detector);
+
+    const cache = (server as unknown as { cache: {
+      get: (...args: unknown[]) => Promise<unknown>;
+      set: (...args: unknown[]) => Promise<void>;
+      reRankResults: (query: string, results: unknown[], limit: number) => Promise<unknown[]>;
+    } }).cache;
+    const cacheGet = vi.spyOn(cache, "get");
+    const cacheSet = vi.spyOn(cache, "set");
+    vi.spyOn(cache, "reRankResults").mockImplementation(async (_query, results, limit) => results.slice(0, limit));
+
+    const response = await callPrivate<{ content: Array<{ text: string }> }>(server, "handleSearch", [{
+      query: "react server components",
+      domain: "react.dev",
+      strategy: "auto",
+      max_results: 5,
+    }]);
+
+    expect(response.content[0].text).toContain("react.dev");
+    expect(detector.detect).toHaveBeenCalledWith("react server components");
+    expect(cacheGet).not.toHaveBeenCalled();
+    expect(cacheSet).not.toHaveBeenCalled();
+    expect(brave.execute).toHaveBeenCalledWith("react server components site:react.dev", expect.any(Object));
+    expect(google.execute).toHaveBeenCalledWith("react server components site:react.dev", expect.any(Object));
+    expect(duckduckgo.execute).not.toHaveBeenCalled();
+    expect(bing.execute).not.toHaveBeenCalled();
+  });
+
+  it("bypasses intent detection for explicit fallback", async () => {
+    vi.stubEnv("NODE_ENV", "test");
+    vi.stubEnv("CACHE_DB_PATH", ":memory:");
+
+    const bing = provider("bing", ["https://example.com/bing"]);
+    const detector = {
+      detect: vi.fn(async () => ({ intent: "news" as const, source: "classifier" as const })),
+    };
+    const server = new WebSearchServer();
+    server.overrideSearchProvidersForTesting([bing]);
+    server.overrideSearchIntentDetectorForTesting(detector);
+
+    const cache = (server as unknown as { cache: {
+      get: (query: string) => Promise<unknown>;
+      set: (...args: unknown[]) => Promise<void>;
+      reRankResults: (query: string, results: unknown[], limit: number) => Promise<unknown[]>;
+    } }).cache;
+    vi.spyOn(cache, "get").mockResolvedValue(null);
+    vi.spyOn(cache, "set").mockResolvedValue();
+    vi.spyOn(cache, "reRankResults").mockImplementation(async (_query, results, limit) => results.slice(0, limit));
+
+    await callPrivate(server, "handleSearch", [{ query: "plain query", strategy: "fallback" }]);
+
+    expect(detector.detect).not.toHaveBeenCalled();
+    expect(bing.execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+async function callPrivate<T>(target: unknown, method: string, args: unknown[] = []): Promise<T> {
+  const callable = (target as Record<string, (...params: unknown[]) => Promise<T>>)[method];
+  return callable.apply(target, args);
+}
