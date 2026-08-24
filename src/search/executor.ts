@@ -23,6 +23,15 @@ function dedupeProviderResults(results: SearchResultItem[]): SearchResultItem[] 
   });
 }
 
+function uniqueProvidersByName(providers: SearchProvider[]): SearchProvider[] {
+  const seen = new Set<string>();
+  return providers.filter((provider) => {
+    if (seen.has(provider.name)) return false;
+    seen.add(provider.name);
+    return true;
+  });
+}
+
 async function runProvider(
   provider: SearchProvider,
   query: string,
@@ -76,8 +85,9 @@ export async function executeProviderSearch({
     return [];
   }
 
+  const aggregateProviders = uniqueProvidersByName(providers);
   const settled = await Promise.all(
-    providers.map(async (provider) => ({
+    aggregateProviders.map(async (provider) => ({
       provider: provider.name,
       results: await runProvider(provider, query, locale, healthTracker),
     }))
