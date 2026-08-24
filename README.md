@@ -5,7 +5,8 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 ## Features
 
 - Browser context pooling with a persistent Playwright browser instance.
-- Web search through configurable providers with health tracking and fallback.
+- Web search through configurable providers with health tracking and ordered fallback.
+- Optional federated search across all configured providers with URL normalization, cross-provider deduplication, and Reciprocal Rank Fusion (RRF).
 - Domain-filtered web search for targeted site queries.
 - HTTP-first page fetching with GitHub Raw and RSS fast paths plus Playwright fallback for rendered pages.
 - SSRF protection for `fetch_content` by blocking localhost and private network targets.
@@ -74,11 +75,18 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 | Tool | Description |
 | --- | --- |
-| `web_search` | Searches the web and returns ranked results. Set `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
+| `web_search` | Searches the web and returns ranked results. Set `strategy=aggregate` for federated multi-provider search, `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with content caching, charset handling, GitHub Raw fast paths, RSS feed extraction, and Playwright fallback. |
 | `server_status` | Returns provider availability, cache stats, browser state, feature flags, and uptime. |
 
-Use regular `web_search` for fast ranked links and snippets. Use `domain` for targeted searches such as `react.dev` or `github.com`. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+`web_search` supports two execution strategies:
+
+- `fallback` (default): tries `SEARCH_PROVIDERS` in order and stops after the first provider that returns usable results. This preserves the original low-latency behavior.
+- `aggregate`: queries every currently available configured provider in parallel, canonicalizes URLs, removes cross-provider duplicates, and merges provider rankings with RRF before the existing semantic re-ranking stage.
+
+Aggregate mode intentionally bypasses the semantic **query** cache for now because the cache does not yet namespace entries by search strategy. Deep-search page content still uses the normal content cache.
+
+Use `domain` for targeted searches such as `react.dev` or `github.com`. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
 
 Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
 
@@ -88,6 +96,16 @@ Example targeted search arguments:
 {
   "query": "server components reference",
   "domain": "react.dev",
+  "max_results": 5
+}
+```
+
+Example federated search arguments:
+
+```json
+{
+  "query": "postgres connection pooling strategies",
+  "strategy": "aggregate",
   "max_results": 5
 }
 ```
@@ -104,7 +122,7 @@ Example targeted search arguments:
 | --- | --- | --- |
 | `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
 | `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
-| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider order. Supported values: `duckduckgo`, `bing`, `brave`, `google`. |
+| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider order for `fallback` and provider set for `aggregate`. Supported values: `duckduckgo`, `bing`, `brave`, `google`. |
 | `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
@@ -138,6 +156,7 @@ npm pack --dry-run --json
 - If startup fails after install, run `npx playwright install chromium`.
 - If the first model-backed request is slow, wait for the Transformers.js model download to finish and retry.
 - If search returns no results, change `SEARCH_PROVIDERS` order or try a direct `fetch_content` URL.
+- If aggregate mode is too slow or triggers provider blocking, use the default `fallback` strategy.
 - If Docker cannot find Chromium, rebuild the image with `npm run docker:build`.
 - If cache files appear in the project root, set `CACHE_DB_PATH` to a dedicated data directory.
 
