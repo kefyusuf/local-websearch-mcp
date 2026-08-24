@@ -19,7 +19,14 @@ import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./
 import type { SearchProvider } from "./providers/base.js";
 import { ProviderHealthTracker } from "./providers/health.js";
 import { buildProviders } from "./providers/registry.js";
-import { executeProviderSearch as executeSearch, type SearchStrategy } from "./search/executor.js";
+import {
+  executeProviderSearch as executeSearch,
+  executeSearchPlan,
+  type SearchStrategy,
+} from "./search/executor.js";
+import { SearchIntentDetector, type IntentDetector } from "./search/intent.js";
+import { planSearch } from "./search/planner.js";
+import { ROUTING_PROFILE_VERSION } from "./search/profiles.js";
 import {
   filterSearchResultsByDomain,
   normalizeDomainFilter,
@@ -35,7 +42,7 @@ export const SearchSchema = z.object({
   deep: z.boolean().optional().describe("If true, fetch the top result pages and extract a direct answer. If false (default), return a ranked list of results quickly without page fetching."),
   max_results: z.number().int().min(1).max(10).optional().describe("Maximum number of results to return (1-10, default 5)."),
   domain: z.string().min(1).optional().describe("Optional domain filter, for example react.dev or github.com."),
-  strategy: z.enum(["fallback", "aggregate"]).optional().describe("Search execution strategy. fallback tries providers in order and stops at the first success. aggregate queries all available providers and fuses results with Reciprocal Rank Fusion."),
+  strategy: z.enum(["fallback", "aggregate", "auto"]).optional().describe("Search execution strategy. fallback tries providers in order and stops at the first success. aggregate queries all available providers and fuses results with Reciprocal Rank Fusion. auto detects search intent and selects a configured-provider plan before using the existing fallback or aggregate execution path."),
 });
 
 const FetchSchema = z.object({
@@ -76,9 +83,10 @@ export class WebSearchServer {
   private fetchWaitUntil: "domcontentloaded" | "networkidle";
   private cacheDbPath: string;
   private contentFetcher: ContentFetcher;
+  private intentDetector: IntentDetector;
   private readonly startedAt = Date.now();
 
-  constructor() {
+  constructor(intentDetector: IntentDetector = new SearchIntentDetector()) {
     this.server = new Server(
       {
         name: "local-websearch-mcp",
@@ -94,11 +102,13 @@ export class WebSearchServer {
     this.enableCrosslingual = getEnvBool("ENABLE_CROSSLINGUAL", false);
     this.fetchWaitUntil = getEnv("FETCH_WAIT_UNTIL", "networkidle") === "domcontentloaded" ? "domcontentloaded" : "networkidle";
     this.cacheDbPath = getEnv("CACHE_DB_PATH", "websearch_cache.db");
+    this.intentDetector = intentDetector;
 
-    // Initialize Semantic Cache with SQLite for persistence
+    // Initialize Semantic Cache with SQLite for persistence. The router and content
+    // cache share one detector so ambiguous requests do not create duplicate models.
     const embeddingProvider = new TransformersEmbeddingProvider();
     const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
-    this.cache = new SemanticCache(embeddingProvider, vectorStore);
+    this.cache = new SemanticCache(embeddingProvider, vectorStore, 0.75, this.intentDetector);
     const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
     const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
     setInterval(() => {
@@ -175,7 +185,7 @@ export class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return results. Use domain to restrict results to a site. Use strategy=aggregate to query all available providers and fuse results with RRF. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
+          description: "Search the web and return results. Use domain to restrict results to a site. Use strategy=aggregate for all configured providers, or strategy=auto for intent-aware provider planning. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
           inputSchema: {
             type: "object",
             properties: {
@@ -185,8 +195,8 @@ export class WebSearchServer {
               domain: { type: "string", description: "Optional domain filter, for example react.dev or github.com" },
               strategy: {
                 type: "string",
-                enum: ["fallback", "aggregate"],
-                description: "fallback tries providers in order; aggregate queries all available providers and fuses results with RRF (default: fallback)",
+                enum: ["fallback", "aggregate", "auto"],
+                description: "fallback tries providers in order; aggregate queries all configured providers; auto detects intent and selects a configured-provider plan (default: fallback)",
               },
             },
             required: ["query"],
@@ -274,9 +284,9 @@ export class WebSearchServer {
       ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
       : "eng_Latn");
 
-    // The semantic query cache currently has no strategy namespace. Keep it on the
-    // legacy fallback path to avoid serving single-provider cache entries to an
-    // aggregate request (or vice versa). Content caching for deep fetches is unchanged.
+    // The semantic query cache currently has no strategy/provider-plan namespace.
+    // Keep it only on the legacy fallback path. Aggregate and auto both bypass it;
+    // deep page-content caching remains unchanged.
     const useSemanticSearchCache = strategy === "fallback";
     const cached = useSemanticSearchCache ? await this.cache.get(cacheKey) : null;
 
@@ -291,8 +301,31 @@ export class WebSearchServer {
       };
     }
 
-    // Search across configured providers according to the requested strategy.
-    const rawResults = await this.executeProviderSearch(providerQuery, queryLocale, strategy);
+    let rawResults: SearchResultItem[];
+    if (strategy === "auto") {
+      const detection = await this.intentDetector.detect(query);
+      const searchPlan = planSearch({
+        intent: detection.intent,
+        configuredProviderNames: this.providers.map((provider) => provider.name),
+      });
+      console.error(`Auto search intent: ${detection.intent} (${detection.source})`);
+      console.error(
+        `Auto search plan: ${searchPlan.strategy} [${searchPlan.primaryProviderNames.join(", ")}]` +
+        (searchPlan.fallbackProviderNames.length > 0
+          ? `, fallback [${searchPlan.fallbackProviderNames.join(", ")}]`
+          : "")
+      );
+      rawResults = await executeSearchPlan({
+        providers: this.providers,
+        query: providerQuery,
+        locale: queryLocale,
+        plan: searchPlan,
+        healthTracker: this.healthTracker,
+      });
+    } else {
+      rawResults = await this.executeProviderSearch(providerQuery, queryLocale, strategy);
+    }
+
     const results = filterSearchResultsByDomain(rawResults, normalizedDomain);
 
     if (results.length === 0) {
@@ -406,6 +439,8 @@ export class WebSearchServer {
       config: {
         searchProviders: this.providers.map((provider) => provider.name),
         searchStrategyDefault: "fallback",
+        autoRouting: "available",
+        routingProfileVersion: ROUTING_PROFILE_VERSION,
         fetchWaitUntil: this.fetchWaitUntil,
         forcePlaywright: getEnvBool("FORCE_PLAYWRIGHT", false),
         cacheDbPath: this.cacheDbPath,
@@ -423,7 +458,6 @@ export class WebSearchServer {
     console.error("Web Search MCP Server running on stdio");
   }
 }
-
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const server = new WebSearchServer();
