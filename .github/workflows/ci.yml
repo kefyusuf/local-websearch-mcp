@@ -31,7 +31,6 @@ jobs:
       - run: npm run smoke:mcp
 
       - name: Dependency security audit
-        continue-on-error: true
         run: npm audit --audit-level=moderate
 
       - run: npm pack --dry-run --json
