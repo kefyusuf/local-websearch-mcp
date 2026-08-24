@@ -9,6 +9,7 @@ describe("SearchSchema", () => {
     expect(parsed.query).toBe("test");
     expect(parsed.deep).toBeUndefined();
     expect(parsed.max_results).toBeUndefined();
+    expect(parsed.strategy).toBeUndefined();
   });
 
   it("accepts deep mode and bounded max_results", () => {
@@ -28,6 +29,15 @@ describe("SearchSchema", () => {
       query: "docs",
       domain: "react.dev",
     });
+  });
+
+  it("accepts fallback and aggregate search strategies", () => {
+    expect(SearchSchema.parse({ query: "test", strategy: "fallback" }).strategy).toBe("fallback");
+    expect(SearchSchema.parse({ query: "test", strategy: "aggregate" }).strategy).toBe("aggregate");
+  });
+
+  it("rejects unsupported search strategies", () => {
+    expect(() => SearchSchema.parse({ query: "test", strategy: "auto" })).toThrowError(ZodError);
   });
 
   it("rejects max_results above the upper bound", () => {
