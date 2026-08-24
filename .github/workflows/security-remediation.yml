@@ -26,7 +26,7 @@ jobs:
           cache: npm
 
       - name: Apply non-breaking npm audit fixes to lockfile
-        run: npm audit fix --package-lock-only
+        run: npm audit fix --package-lock-only || true
 
       - name: Show remaining audit findings
         run: npm audit --audit-level=moderate || true
