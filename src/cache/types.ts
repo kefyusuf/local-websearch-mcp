@@ -12,6 +12,9 @@ export interface SearchResultItem {
   url: string;
   snippet: string;
   source: string;
+  sources?: string[];
+  providerRanks?: Record<string, number>;
+  fusionScore?: number;
   semanticScore?: number;
 }
 
