@@ -58,7 +58,6 @@ export function fuseSearchResults(
       if (!existing) {
         fused.set(normalizedUrl, {
           ...result,
-          url: normalizedUrl,
           source: result.source || provider,
           sources: [provider],
           providerRanks: { [provider]: rank },
