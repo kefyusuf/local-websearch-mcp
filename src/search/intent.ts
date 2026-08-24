@@ -20,6 +20,10 @@ export interface IntentClassifier {
   classify(query: string): Promise<SearchIntent>;
 }
 
+export interface IntentDetector {
+  detect(query: string): Promise<IntentDetection>;
+}
+
 const LABEL_TO_INTENT: Record<string, SearchIntent> = {
   "software development and technical documentation": "technical",
   "research comparison and evidence gathering": "research",
@@ -69,7 +73,7 @@ export class SearchIntentClassifier implements IntentClassifier {
   }
 }
 
-export class SearchIntentDetector {
+export class SearchIntentDetector implements IntentDetector {
   constructor(
     private readonly classifier: IntentClassifier = new SearchIntentClassifier(),
   ) {}
