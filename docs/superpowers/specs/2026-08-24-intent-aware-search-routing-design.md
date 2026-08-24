@@ -1,7 +1,7 @@
 # v1.2 Intent-Aware Search Routing — Design
 
 Date: 2026-08-24
-Status: Approved for implementation planning
+Status: Design approved in chat; written spec pending review
 Branch: `design/v1.2-intent-aware-search-routing`
 
 ## 1. Objective
@@ -162,6 +162,29 @@ Do not create independent model instances for the router and cache. The server s
 
 Existing content TTL categorization may continue to consume the same detector through a narrow interface.
 
+For v1.2, content-cache TTL mapping remains deliberately coarse:
+
+- `news` -> `news`
+- `technical` -> `technical`
+- every other search intent -> `general`
+
+Expanding cache TTL categories for shopping/local/commercial/research is not part of this milestone.
+
+### 5.4 Intent input semantics
+
+Intent detection always receives the original user `query`, not the provider-specific query after domain rewriting.
+
+For example:
+
+```text
+query: "Laravel queue retry best practices"
+domain: "laravel.com"
+```
+
+The router classifies only `Laravel queue retry best practices`. The provider executor may later receive `Laravel queue retry best practices site:laravel.com`.
+
+This prevents `site:` syntax or domain names from accidentally changing retrieval intent.
+
 ## 6. Search Planner
 
 The planner must be pure/data-oriented and return provider names rather than provider instances.
@@ -210,6 +233,8 @@ Initial profile version: `v1`.
 | navigational | fallback | google, bing, duckduckgo, brave | all configured in preferred order |
 | general | fallback | existing configured order | all configured |
 
+If fewer configured providers exist than a profile's primary target, all available configured providers in preference order become primary.
+
 Example:
 
 ```env
@@ -235,6 +260,8 @@ No provider outside the configuration is called.
 
 For plans whose strategy is `fallback`, execute the ordered primary list using the current fallback behavior. The executor stops on the first usable provider result.
 
+For `general`, that ordered list is exactly the existing configured provider order. For `navigational`, it is the profile-preferred order intersected with configured providers.
+
 ### 8.2 Planned aggregate
 
 For aggregate plans:
@@ -244,6 +271,7 @@ For aggregate plans:
 3. If at least one primary provider returns usable results, return the fused primary result set; do not call secondary providers merely to increase result count.
 4. If all primary providers return no usable results, run the remaining configured providers as ordered fallback.
 5. Existing provider-health backoff remains authoritative.
+6. If no secondary providers remain and all primaries fail, return the existing no-results/unavailable response.
 
 This limits unnecessary scraping load and reduces CAPTCHA/blocking exposure.
 
@@ -353,6 +381,7 @@ CI metrics/acceptance:
 - planner output matches expected execution mode and provider subset.
 - configured-provider allowlist is never violated.
 - explicit fallback/aggregate behavior remains unchanged.
+- domain-filter syntax does not affect intent classification.
 - locale regression cases pass.
 
 Do not make network search quality a CI requirement.
@@ -385,16 +414,18 @@ Minimum test groups:
 1. `SearchSchema` accepts `auto` and rejects unknown strategies.
 2. heuristic detector: positive and ambiguity/defer cases.
 3. classifier mapping/failure fallback without loading real models.
-4. planner profile tests for every intent.
-5. allowlist tests with partial provider configurations.
-6. aggregate-primary success does not call secondary fallback providers.
-7. aggregate-primary total failure falls back to remaining configured providers.
-8. explicit fallback remains first-success ordered behavior.
-9. explicit aggregate remains all-configured-provider behavior.
-10. auto semantic query-cache bypass.
-11. Turkish locale regression with cross-lingual disabled.
-12. server-status routing metadata.
-13. MCP smoke/tool schema exposes `auto` without changing the default.
+4. shared detector/classifier dependency does not create duplicate classifier instances in server/cache wiring.
+5. planner profile tests for every intent.
+6. allowlist tests with partial provider configurations.
+7. aggregate-primary success does not call secondary fallback providers.
+8. aggregate-primary total failure falls back to remaining configured providers.
+9. explicit fallback remains first-success ordered behavior.
+10. explicit aggregate remains all-configured-provider behavior.
+11. auto semantic query-cache bypass.
+12. domain-filtered auto search classifies the original query rather than the `site:`-rewritten provider query.
+13. Turkish locale regression with cross-lingual disabled.
+14. server-status routing metadata.
+15. MCP smoke/tool schema exposes `auto` without changing the default.
 
 Existing v1.1 federated regression tests remain mandatory.
 
@@ -416,7 +447,9 @@ src/search/
 parse request
 -> resolve locale
 -> resolve explicit/auto strategy
+-> classify original query for auto only
 -> resolve SearchPlan for auto only
+-> create provider query/domain rewrite
 -> execute
 -> filter/rerank/deep fetch
 -> format response
@@ -452,6 +485,7 @@ Not part of v1.2:
 - new official search API integrations.
 - redesign of existing RRF/semantic weighting without evaluation evidence.
 - provider outcome taxonomy overhaul unless required by a correctness bug discovered during implementation.
+- new content-cache TTL categories for the expanded intent taxonomy.
 
 ## 18. Acceptance Criteria
 
@@ -462,13 +496,15 @@ v1.2 is complete when:
 3. all eight intents have versioned routing profiles.
 4. heuristics avoid model inference for high-confidence queries and defer ambiguous cases.
 5. the local classifier handles unresolved intent and fails safely to `general`.
-6. planner never uses an unconfigured provider.
-7. aggregate plans use only primary providers unless all primary providers fail.
-8. auto search does not read/write the current semantic query cache.
-9. Turkish locale inference works when cross-lingual mode is disabled.
-10. routing decisions are covered by deterministic TR/EN fixtures.
-11. normal repository CI passes, including the blocking dependency audit.
-12. no temporary workflow or generated remediation artifact remains in the final PR.
+6. a shared detector/classifier dependency avoids duplicate model instances for routing and cache intent use.
+7. planner never uses an unconfigured provider.
+8. aggregate plans use only primary providers unless all primary providers fail.
+9. auto search does not read/write the current semantic query cache.
+10. domain-filtered auto search classifies the original query, not provider-specific `site:` syntax.
+11. Turkish locale inference works when cross-lingual mode is disabled.
+12. routing decisions are covered by deterministic TR/EN fixtures.
+13. normal repository CI passes, including the blocking dependency audit.
+14. no temporary workflow or generated remediation artifact remains in the final PR.
 
 ## 19. Follow-Up Direction
 
