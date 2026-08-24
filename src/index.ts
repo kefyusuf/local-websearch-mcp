@@ -280,9 +280,10 @@ export class WebSearchServer {
     const normalizedDomain = normalizeDomainFilter(domain);
     const providerQuery = normalizedDomain ? `${query} site:${normalizedDomain}` : query;
     const cacheKey = normalizedDomain ? `${query} domain:${normalizedDomain}` : query;
-    const queryLocale = resolveSearchLocale(query, this.crossLingual
-      ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
-      : "eng_Latn");
+    const detectedLanguage = this.crossLingual
+      ? await this.crossLingual.detectLanguage(query).catch(() => null)
+      : null;
+    const queryLocale = resolveSearchLocale(query, detectedLanguage);
 
     // The semantic query cache currently has no strategy/provider-plan namespace.
     // Keep it only on the legacy fallback path. Aggregate and auto both bypass it;
