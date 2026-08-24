@@ -132,8 +132,6 @@ describe("search intent detection", () => {
 
 - [ ] **Step 2: Run the intent tests and verify RED**
 
-Run:
-
 ```bash
 npm test -- src/__tests__/search-intent.test.ts
 ```
@@ -195,6 +193,7 @@ const RULES: HeuristicRule[] = [
     intent: "commercial",
     patterns: [
       /\b(vendor|vendors|competitor|competitors|enterprise product|company discovery|supplier)\b/i,
+      /\benterprise\b.*\b(adoption|benchmark|market|platform|vendor|product)\b/i,
       /\b(tedarikçi|rakip(?:ler)?|kurumsal ürün|şirket araştırması)\b/i,
     ],
   },
@@ -216,7 +215,7 @@ export function detectHeuristicIntent(query: string): SearchIntent | null {
 }
 ```
 
-If a fixture exposes an accidental overlap, make the rule more conservative; do not add priority ordering.
+`enterprise adoption benchmark` deliberately matches both `commercial` and `research`, so it returns `null` and exercises the classifier boundary. If a fixture exposes an accidental overlap, narrow the relevant regex; do not add priority ordering.
 
 - [ ] **Step 4: Implement the 8-intent classifier adapter and detector**
 
@@ -340,16 +339,12 @@ it("fails safely to general and does not reload after permanent load failure", a
 
 - [ ] **Step 6: Run tests and commit GREEN**
 
-Run:
-
 ```bash
 npm test -- src/__tests__/search-intent.test.ts
 npm run typecheck
 ```
 
 Expected: PASS.
-
-Commit:
 
 ```bash
 git add src/search/heuristics.ts src/search/intent.ts src/__tests__/search-intent.test.ts
@@ -541,8 +536,6 @@ npm run typecheck
 
 Expected: PASS.
 
-Commit:
-
 ```bash
 git add src/search/profiles.ts src/search/planner.ts src/__tests__/search-planner.test.ts
 git commit -m "feat: add intent-aware search planner"
@@ -617,7 +610,7 @@ it("planned aggregate falls back only when every primary provider fails", async 
 });
 ```
 
-Also add a planned fallback test that verifies first-success behavior is still ordered.
+Add one planned-fallback test that passes a plan with `strategy: "fallback"`, `primaryProviderNames: ["google", "bing"]`, verifies Google empty -> Bing success, and verifies no provider after Bing is called.
 
 - [ ] **Step 2: Run focused tests and verify RED**
 
@@ -696,8 +689,6 @@ npm run typecheck
 
 Expected: PASS, including all existing URL-normalization and explicit-strategy regressions.
 
-Commit:
-
 ```bash
 git add src/search/executor.ts src/__tests__/federated-search.test.ts
 git commit -m "feat: execute planned provider searches"
@@ -736,8 +727,6 @@ it("rejects unsupported search strategies", () => {
 });
 ```
 
-Run:
-
 ```bash
 npm test -- src/__tests__/search-params.test.ts
 ```
@@ -746,7 +735,7 @@ Expected: FAIL because `auto` is not yet in the schema.
 
 - [ ] **Step 2: Write auto orchestration RED tests**
 
-Create `src/__tests__/auto-search.test.ts`. Use prototype spies so the production server still owns one real detector instance while tests avoid loading a model:
+Create `src/__tests__/auto-search.test.ts`. Use prototype spies so the production server still owns one detector instance while tests avoid loading a model:
 
 ```ts
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -769,7 +758,7 @@ describe("auto search orchestration", () => {
     vi.unstubAllEnvs();
   });
 
-  it("routes technical auto search to planned primary providers", async () => {
+  it("routes technical auto search to planned primary providers and bypasses query cache", async () => {
     vi.stubEnv("NODE_ENV", "test");
     vi.stubEnv("CACHE_DB_PATH", ":memory:");
     vi.spyOn(SearchIntentDetector.prototype, "detect")
@@ -781,7 +770,7 @@ describe("auto search orchestration", () => {
 
     const server = new WebSearchServer();
     server.overrideSearchProvidersForTesting([brave, google, bing]);
-    const cache = (server as unknown as { cache: { get: Function; set: Function; reRankResults: Function } }).cache;
+    const cache = (server as any).cache;
     vi.spyOn(cache, "get").mockResolvedValue(null);
     vi.spyOn(cache, "set").mockResolvedValue(undefined);
     vi.spyOn(cache, "reRankResults").mockImplementation(async (_query: string, rows: unknown[]) => rows);
@@ -841,9 +830,7 @@ describe("auto search orchestration", () => {
 
 - [ ] **Step 3: Refactor semantic cache to use the shared detector**
 
-In `src/cache/semantic-cache.ts`:
-
-1. Replace the import from `./intent.js` with:
+In `src/cache/semantic-cache.ts` replace the cache-local classifier import with:
 
 ```ts
 import {
@@ -852,8 +839,7 @@ import {
 } from "../search/intent.js";
 ```
 
-2. Replace `private intentClassifier` with `private intentDetector`.
-3. Extend the constructor without breaking existing tests/callers:
+Replace `private intentClassifier` with `private intentDetector` and preserve existing constructor call compatibility:
 
 ```ts
 constructor(
@@ -869,7 +855,7 @@ constructor(
 }
 ```
 
-4. Change:
+Change intent detection to:
 
 ```ts
 async detectIntent(query: string): Promise<SearchIntent> {
@@ -877,7 +863,7 @@ async detectIntent(query: string): Promise<SearchIntent> {
 }
 ```
 
-5. Keep TTL mapping intentionally narrow:
+Keep content TTL mapping intentionally narrow:
 
 ```ts
 private intentToContentCategory(intent: SearchIntent): string {
@@ -891,9 +877,7 @@ Delete `src/cache/intent.ts` only after all imports have moved.
 
 - [ ] **Step 4: Integrate `auto` into `WebSearchServer`**
 
-Modify `src/index.ts`:
-
-Imports:
+Modify `src/index.ts` imports:
 
 ```ts
 import { SearchIntentDetector } from "./search/intent.js";
@@ -906,11 +890,7 @@ import {
 } from "./search/executor.js";
 ```
 
-Keep executor `SearchStrategy` as `fallback | aggregate`; use a local public type only where needed:
-
-```ts
-type PublicSearchStrategy = SearchStrategy | "auto";
-```
+Keep executor `SearchStrategy` as `fallback | aggregate`; `auto` exists only in the MCP schema/orchestration branch.
 
 Schema:
 
@@ -918,27 +898,21 @@ Schema:
 strategy: z.enum(["fallback", "aggregate", "auto"]).optional()
 ```
 
-Server property and constructor order:
+After existing env-derived fields (`enableCrosslingual`, `fetchWaitUntil`, `cacheDbPath`) have been assigned, create one detector and inject the same instance into the cache:
 
 ```ts
-private intentDetector: SearchIntentDetector;
-
-constructor() {
-  // existing Server construction...
-  this.intentDetector = new SearchIntentDetector();
-  const embeddingProvider = new TransformersEmbeddingProvider();
-  const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
-  this.cache = new SemanticCache(
-    embeddingProvider,
-    vectorStore,
-    0.75,
-    this.intentDetector,
-  );
-  // remaining setup...
-}
+this.intentDetector = new SearchIntentDetector();
+const embeddingProvider = new TransformersEmbeddingProvider();
+const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
+this.cache = new SemanticCache(
+  embeddingProvider,
+  vectorStore,
+  0.75,
+  this.intentDetector,
+);
 ```
 
-In `handleSearch`, keep default `strategy = "fallback"`; set cache usage exactly to:
+In `handleSearch`, keep default `strategy = "fallback"` and query-cache behavior exactly:
 
 ```ts
 const useSemanticSearchCache = strategy === "fallback";
@@ -973,7 +947,7 @@ if (strategy === "auto") {
 }
 ```
 
-Do not pass `providerQuery` into `intentDetector.detect`; only the original `query` is classified.
+Do not pass `providerQuery` into `intentDetector.detect`; only original `query` is classified.
 
 - [ ] **Step 5: Expose tool/status routing metadata and test it**
 
@@ -987,7 +961,7 @@ config: {
   searchStrategyDefault: "fallback",
   autoRouting: "available",
   routingProfileVersion: ROUTING_PROFILE_VERSION,
-  // existing fields...
+  // preserve existing fetch/cache config fields
 }
 ```
 
@@ -1017,8 +991,6 @@ npm run typecheck
 ```
 
 Expected: PASS, with no real intent model download in tests.
-
-Commit:
 
 ```bash
 git add src/index.ts src/cache/semantic-cache.ts src/search/intent.ts \
@@ -1127,8 +1099,6 @@ npm run typecheck
 
 Expected: PASS.
 
-Commit:
-
 ```bash
 git add src/index.ts src/__tests__/search-locale-routing.test.ts
 git commit -m "fix: infer locale when cross-lingual search is disabled"
@@ -1148,7 +1118,7 @@ git commit -m "fix: infer locale when cross-lingual search is disabled"
 
 - [ ] **Step 1: Add a compact bilingual fixture covering all intents and ambiguity**
 
-Create `evals/search-routing/queries.jsonl` with exactly valid JSON objects, one per line:
+Create `evals/search-routing/queries.jsonl`:
 
 ```jsonl
 {"query":"npm ERESOLVE dependency error","intent":"technical","heuristic":"technical"}
@@ -1170,7 +1140,7 @@ Create `evals/search-routing/queries.jsonl` with exactly valid JSON objects, one
 {"query":"PostgreSQL vs CockroachDB enterprise adoption benchmark","intent":"research","heuristic":null}
 ```
 
-The last ambiguity fixture intentionally expects heuristic defer even though the ultimate labeled intent is `research`.
+The last ambiguity fixture intentionally expects heuristic defer even though the human-labeled ultimate intent is `research`.
 
 - [ ] **Step 2: Write fixture parser and deterministic acceptance tests**
 
@@ -1237,7 +1207,7 @@ git commit -m "test: add search routing evaluation fixtures"
 **Files:**
 - Modify: `scripts/smoke-mcp.mjs`
 - Modify: `README.md`
-- Modify if needed from review only: `src/index.ts`, `src/search/*.ts`, tests created above.
+- Modify if a review finding requires a scoped correction: files already introduced by Tasks 1–6.
 
 **Interfaces:**
 - Verifies the public contract end-to-end.
@@ -1291,7 +1261,7 @@ Add an example:
 }
 ```
 
-Document these invariants explicitly:
+Document these invariants:
 
 - `SEARCH_PROVIDERS` is an allowlist, not merely a preference list.
 - auto never calls a provider omitted from `SEARCH_PROVIDERS`.
@@ -1311,8 +1281,6 @@ npm test
 Expected: every existing and new Vitest test passes. No test may depend on a live search provider or a real model download.
 
 - [ ] **Step 4: Run the full release verification chain**
-
-Run in this exact order:
 
 ```bash
 npm ci
