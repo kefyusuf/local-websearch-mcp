@@ -17,7 +17,7 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 
 ## Requirements
 
-- Node.js 20 or newer.
+- Node.js 20.9.0 or newer.
 - npm.
 - Network access during installation for npm packages, Playwright Chromium, and first-run model downloads.
 
