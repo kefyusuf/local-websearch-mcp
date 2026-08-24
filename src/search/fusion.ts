@@ -12,16 +12,16 @@ export function normalizeSearchUrl(rawUrl: string): string {
   try {
     const parsed = new URL(rawUrl);
     const hostname = parsed.hostname.toLowerCase().replace(/^www\./, "");
+    const routeFragment = parsed.hash.startsWith("#/") || parsed.hash.startsWith("#!")
+      ? parsed.hash
+      : "";
     const pathname = parsed.pathname === "/"
-      ? ""
+      ? (routeFragment ? "/" : "")
       : parsed.pathname.replace(/\/+$/, "");
 
     const params = Array.from(parsed.searchParams.entries())
       .filter(([key]) => !TRACKING_PARAM.test(key))
-      .sort(([keyA, valueA], [keyB, valueB]) => {
-        const keyCompare = keyA.localeCompare(keyB);
-        return keyCompare !== 0 ? keyCompare : valueA.localeCompare(valueB);
-      });
+      .sort(([keyA], [keyB]) => keyA.localeCompare(keyB));
 
     const search = new URLSearchParams();
     for (const [key, value] of params) {
@@ -29,7 +29,7 @@ export function normalizeSearchUrl(rawUrl: string): string {
     }
 
     const query = search.toString();
-    return `${parsed.protocol}//${hostname}${parsed.port ? `:${parsed.port}` : ""}${pathname}${query ? `?${query}` : ""}`;
+    return `${parsed.protocol}//${hostname}${parsed.port ? `:${parsed.port}` : ""}${pathname}${query ? `?${query}` : ""}${routeFragment}`;
   } catch {
     return rawUrl.trim();
   }
