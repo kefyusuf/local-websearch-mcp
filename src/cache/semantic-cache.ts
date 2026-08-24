@@ -12,6 +12,9 @@ const TTL_MAP: Record<string, number> = {
   general: 7 * 24 * 60 * 60 * 1000,  // 7 Days
 };
 
+const SEMANTIC_RANK_WEIGHT = 0.7;
+const FUSION_RANK_WEIGHT = 0.3;
+
 export class SemanticCache {
   private embeddingProvider: IEmbeddingProvider;
   private vectorStore: IVectorStore;
@@ -156,7 +159,7 @@ export class SemanticCache {
     if (!queryVector) return results;
 
     try {
-      const rankedResults = await Promise.all(
+      const semanticallyScored = await Promise.all(
         results.map(async (res) => {
           const text = `${res.title} ${res.snippet}`;
           const resVector = await this.embeddingProvider.getEmbedding(text);
@@ -166,8 +169,23 @@ export class SemanticCache {
         })
       );
 
-      const sorted = rankedResults.sort((a, b) => b.semanticScore - a.semanticScore);
-      return sorted.slice(0, limit);
+      const maxFusionScore = semanticallyScored.reduce(
+        (max, result) => Math.max(max, result.fusionScore ?? 0),
+        0
+      );
+
+      const rankedResults = semanticallyScored.map((result) => {
+        const normalizedFusionScore = maxFusionScore > 0
+          ? (result.fusionScore ?? 0) / maxFusionScore
+          : 0;
+        const rankingScore = maxFusionScore > 0
+          ? result.semanticScore * SEMANTIC_RANK_WEIGHT + normalizedFusionScore * FUSION_RANK_WEIGHT
+          : result.semanticScore;
+        return { ...result, rankingScore };
+      });
+
+      rankedResults.sort((a, b) => b.rankingScore - a.rankingScore);
+      return rankedResults.slice(0, limit).map(({ rankingScore: _rankingScore, ...result }) => result);
     } catch (error) {
       console.error("Re-ranking error:", error);
       return results.slice(0, limit);
