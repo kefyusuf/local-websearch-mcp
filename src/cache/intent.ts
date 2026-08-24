@@ -1,4 +1,4 @@
-import { pipeline } from "@xenova/transformers";
+import { pipeline } from "@huggingface/transformers";
 
 export type SearchIntent = "technical" | "news" | "general";
 
