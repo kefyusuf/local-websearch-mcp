@@ -1,15 +1,15 @@
 name: Security Remediation
 
 on:
-  push:
-    branches: [fix/security-dependency-debt]
-    paths: [package.json]
+  pull_request:
+    branches: [main]
 
 permissions:
   contents: write
 
 jobs:
   refresh-lockfile:
+    if: github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
 
     steps:
