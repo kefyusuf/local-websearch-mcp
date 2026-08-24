@@ -14,6 +14,11 @@ Do not include secrets, private tokens, or credentials in reports.
 
 The server includes SSRF protection for `fetch_content`, rate limiting for public MCP tools, and no requirement for external API keys.
 
-As of the latest local release-readiness pass, `npm audit --audit-level=moderate` reports 0 vulnerabilities.
+Dependency security is enforced in CI with `npm audit --audit-level=moderate`; moderate-or-higher findings fail the CI job.
 
-The project uses an npm `overrides` entry to pin transitive `protobufjs` to `8.6.5` because `@xenova/transformers -> onnxruntime-web -> onnx-proto` otherwise resolves an older vulnerable `protobufjs` release. Keep this override until the upstream dependency chain resolves to a non-vulnerable version without local intervention.
+The project uses the maintained `@huggingface/transformers` package for local model pipelines. Two temporary npm overrides keep transitive native/archive dependencies on patched releases:
+
+- `sharp` is pinned to `0.35.3` because the current Transformers.js dependency range still resolves a vulnerable `<0.35.0` release.
+- `adm-zip` is pinned to `0.6.0` because current `onnxruntime-node` releases still request the vulnerable `^0.5.x` line.
+
+Remove these overrides when the corresponding upstream dependency ranges include patched versions and the blocking audit remains clean without local intervention.
