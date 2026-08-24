@@ -1,0 +1,17 @@
+{"query":"npm ERESOLVE dependency error","intent":"technical","heuristic":"technical"}
+{"query":"Laravel queue worker retry configuration","intent":"technical","heuristic":"technical"}
+{"query":"OpenAI latest news today","intent":"news","heuristic":"news"}
+{"query":"bugün son dakika yapay zeka haberleri","intent":"news","heuristic":"news"}
+{"query":"iPhone 17 price and discount","intent":"shopping","heuristic":"shopping"}
+{"query":"Bosch ocak fiyat kampanya","intent":"shopping","heuristic":"shopping"}
+{"query":"coffee shops near me","intent":"local","heuristic":"local"}
+{"query":"yakınımdaki kahve dükkanları","intent":"local","heuristic":"local"}
+{"query":"official PostgreSQL documentation page","intent":"navigational","heuristic":"navigational"}
+{"query":"github.com/openai/openai","intent":"navigational","heuristic":"navigational"}
+{"query":"enterprise CRM vendors and competitors","intent":"commercial","heuristic":"commercial"}
+{"query":"kurumsal ERP tedarikçi ve rakipler","intent":"commercial","heuristic":"commercial"}
+{"query":"cloud database market adoption survey","intent":"research","heuristic":"research"}
+{"query":"veritabanı pazar payı araştırması","intent":"research","heuristic":"research"}
+{"query":"how does photosynthesis work","intent":"general","heuristic":null}
+{"query":"İstanbul'un tarihi","intent":"general","heuristic":null}
+{"query":"enterprise vendors market adoption benchmark","intent":"research","heuristic":null}
