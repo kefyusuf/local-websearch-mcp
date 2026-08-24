@@ -1,4 +1,4 @@
-import { pipeline } from "@xenova/transformers";
+import { pipeline } from "@huggingface/transformers";
 import { IEmbeddingProvider } from "./types.js";
 
 export class TransformersEmbeddingProvider implements IEmbeddingProvider {
