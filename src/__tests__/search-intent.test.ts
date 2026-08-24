@@ -32,7 +32,7 @@ describe("search intent detection", () => {
     };
     const detector = new SearchIntentDetector(classifier);
 
-    await expect(detector.detect("database platform landscape")).resolves.toEqual({
+    await expect(detector.detect("database platform options")).resolves.toEqual({
       intent: "research",
       source: "classifier",
     });
