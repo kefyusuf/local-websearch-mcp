@@ -19,6 +19,7 @@ import { createSearchRateLimiter, createFetchRateLimiter, TokenBucket } from "./
 import type { SearchProvider } from "./providers/base.js";
 import { ProviderHealthTracker } from "./providers/health.js";
 import { buildProviders } from "./providers/registry.js";
+import { executeProviderSearch as executeSearch, type SearchStrategy } from "./search/executor.js";
 import {
   filterSearchResultsByDomain,
   normalizeDomainFilter,
@@ -34,6 +35,7 @@ export const SearchSchema = z.object({
   deep: z.boolean().optional().describe("If true, fetch the top result pages and extract a direct answer. If false (default), return a ranked list of results quickly without page fetching."),
   max_results: z.number().int().min(1).max(10).optional().describe("Maximum number of results to return (1-10, default 5)."),
   domain: z.string().min(1).optional().describe("Optional domain filter, for example react.dev or github.com."),
+  strategy: z.enum(["fallback", "aggregate"]).optional().describe("Search execution strategy. fallback tries providers in order and stops at the first success. aggregate queries all available providers and fuses results with Reciprocal Rank Fusion."),
 });
 
 const FetchSchema = z.object({
@@ -173,7 +175,7 @@ export class WebSearchServer {
       tools: [
         {
           name: "web_search",
-          description: "Search the web and return results. Use domain to restrict results to a site. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
+          description: "Search the web and return results. Use domain to restrict results to a site. Use strategy=aggregate to query all available providers and fuse results with RRF. Use deep=true to fetch pages and extract a direct answer (slower). Use deep=false (default) for a quick ranked list of URLs and snippets.",
           inputSchema: {
             type: "object",
             properties: {
@@ -181,6 +183,11 @@ export class WebSearchServer {
               deep: { type: "boolean", description: "Fetch pages and extract answer (default: false)" },
               max_results: { type: "number", description: "Number of results to return, 1-10 (default: 5)" },
               domain: { type: "string", description: "Optional domain filter, for example react.dev or github.com" },
+              strategy: {
+                type: "string",
+                enum: ["fallback", "aggregate"],
+                description: "fallback tries providers in order; aggregate queries all available providers and fuses results with RRF (default: fallback)",
+              },
             },
             required: ["query"],
           },
@@ -259,14 +266,19 @@ export class WebSearchServer {
       };
     }
 
-    const { query, deep = false, max_results = 5, domain } = SearchSchema.parse(args);
+    const { query, deep = false, max_results = 5, domain, strategy = "fallback" } = SearchSchema.parse(args);
     const normalizedDomain = normalizeDomainFilter(domain);
     const providerQuery = normalizedDomain ? `${query} site:${normalizedDomain}` : query;
     const cacheKey = normalizedDomain ? `${query} domain:${normalizedDomain}` : query;
     const queryLocale = resolveSearchLocale(query, this.crossLingual
       ? await this.crossLingual.detectLanguage(query).catch(() => "eng_Latn")
       : "eng_Latn");
-    const cached = await this.cache.get(cacheKey);
+
+    // The semantic query cache currently has no strategy namespace. Keep it on the
+    // legacy fallback path to avoid serving single-provider cache entries to an
+    // aggregate request (or vice versa). Content caching for deep fetches is unchanged.
+    const useSemanticSearchCache = strategy === "fallback";
+    const cached = useSemanticSearchCache ? await this.cache.get(cacheKey) : null;
 
     if (cached !== null && cached.length > 0) {
       console.error(`Semantic cache hit for query: ${query}`);
@@ -279,8 +291,8 @@ export class WebSearchServer {
       };
     }
 
-    // Search across configured providers
-    const rawResults = await this.executeProviderSearch(providerQuery, queryLocale);
+    // Search across configured providers according to the requested strategy.
+    const rawResults = await this.executeProviderSearch(providerQuery, queryLocale, strategy);
     const results = filterSearchResultsByDomain(rawResults, normalizedDomain);
 
     if (results.length === 0) {
@@ -292,7 +304,10 @@ export class WebSearchServer {
       };
     }
 
-    await this.cache.set(cacheKey, results);
+    if (useSemanticSearchCache) {
+      await this.cache.set(cacheKey, results);
+    }
+
     if (!deep) {
       const reranked = await this.cache.reRankResults(query, results, max_results);
       return {
@@ -323,42 +338,18 @@ export class WebSearchServer {
     };
   }
 
-  private async executeProviderSearch(query: string, locale: SearchLocale): Promise<SearchResultItem[]> {
-    for (const provider of this.providers) {
-      if (!this.healthTracker.isAvailable(provider.name)) {
-        console.error(`Skipping provider ${provider.name}: provider is in backoff window`);
-        continue;
-      }
-
-      try {
-        const results = await provider.execute(query, locale);
-        if (results.length > 0) {
-          const seen = new Set<string>();
-          const deduped = results.filter((result) => {
-            if (!result.url || seen.has(result.url)) return false;
-            seen.add(result.url);
-            return true;
-          });
-          if (deduped.length < results.length) {
-            console.error(`Deduplicated ${results.length - deduped.length} duplicate URLs from ${provider.name}`);
-          }
-          if (deduped.length === 0) {
-            this.healthTracker.record(provider.name, false);
-            console.error(`Provider ${provider.name} returned 0 parsed results after deduplication`);
-            continue;
-          }
-          this.healthTracker.record(provider.name, true);
-          console.error(`Provider ${provider.name} returned ${deduped.length} results`);
-          return deduped;
-        }
-        this.healthTracker.record(provider.name, false);
-        console.error(`Provider ${provider.name} returned 0 parsed results`);
-      } catch (e) {
-        this.healthTracker.record(provider.name, false);
-        console.error(`Provider ${provider.name} error:`, e instanceof Error ? e.message : String(e));
-      }
-    }
-    return [];
+  private async executeProviderSearch(
+    query: string,
+    locale: SearchLocale,
+    strategy: SearchStrategy = "fallback"
+  ): Promise<SearchResultItem[]> {
+    return executeSearch({
+      providers: this.providers,
+      query,
+      locale,
+      strategy,
+      healthTracker: this.healthTracker,
+    });
   }
 
   private async handleFetch(args: unknown) {
@@ -414,6 +405,7 @@ export class WebSearchServer {
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
       config: {
         searchProviders: this.providers.map((provider) => provider.name),
+        searchStrategyDefault: "fallback",
         fetchWaitUntil: this.fetchWaitUntil,
         forcePlaywright: getEnvBool("FORCE_PLAYWRIGHT", false),
         cacheDbPath: this.cacheDbPath,
@@ -422,7 +414,7 @@ export class WebSearchServer {
     };
     return {
       content: [{ type: "text", text: JSON.stringify(status, null, 2) }],
-    }
+    };
   }
 
   async run() {
