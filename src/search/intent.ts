@@ -49,6 +49,7 @@ export type PipelineLoader = (
 
 export class SearchIntentClassifier implements IntentClassifier {
   private classifier: ZeroShotRunner | null = null;
+  private classifierLoadPromise: Promise<ZeroShotRunner | null> | null = null;
   private classifierLoadFailed = false;
 
   constructor(
@@ -60,14 +61,23 @@ export class SearchIntentClassifier implements IntentClassifier {
     if (this.classifierLoadFailed) return null;
     if (this.classifier) return this.classifier;
 
-    try {
-      this.classifier = await this.loadPipeline("zero-shot-classification", this.modelName);
-      return this.classifier;
-    } catch (error) {
-      this.classifierLoadFailed = true;
-      console.error("Intent classification model permanently failed:", error);
-      return null;
+    if (!this.classifierLoadPromise) {
+      this.classifierLoadPromise = this.loadPipeline("zero-shot-classification", this.modelName)
+        .then((classifier) => {
+          this.classifier = classifier;
+          return classifier;
+        })
+        .catch((error) => {
+          this.classifierLoadFailed = true;
+          console.error("Intent classification model permanently failed:", error);
+          return null;
+        })
+        .finally(() => {
+          this.classifierLoadPromise = null;
+        });
     }
+
+    return this.classifierLoadPromise;
   }
 
   async classify(query: string): Promise<SearchIntent> {
