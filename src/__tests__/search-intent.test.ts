@@ -71,4 +71,20 @@ describe("search intent detection", () => {
     await expect(classifier.classify("another query")).resolves.toBe("general");
     expect(loader).toHaveBeenCalledTimes(1);
   });
+
+  it("retries classification after a transient inference failure", async () => {
+    const runner = vi.fn()
+      .mockRejectedValueOnce(new Error("transient inference failure"))
+      .mockResolvedValueOnce({
+        labels: ["research comparison and evidence gathering"],
+        scores: [0.88],
+      });
+    const loader = vi.fn(async () => runner);
+    const classifier = new SearchIntentClassifier("test-model", loader);
+
+    await expect(classifier.classify("first ambiguous query")).resolves.toBe("general");
+    await expect(classifier.classify("second ambiguous query")).resolves.toBe("research");
+    expect(loader).toHaveBeenCalledTimes(1);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
 });
