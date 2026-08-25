@@ -4,7 +4,7 @@ import type { SearchProvider } from "../providers/base.js";
 import { ProviderHealthTracker } from "../providers/health.js";
 import { executeSearchPlan } from "../search/executor.js";
 import type { SearchPlan } from "../search/planner.js";
-import type { SearchLocale } from "../search-utils.js";
+import { filterSearchResultsByDomain, type SearchLocale } from "../search-utils.js";
 
 const locale: SearchLocale = {
   acceptLanguage: "en-US,en;q=0.9",
@@ -69,6 +69,28 @@ describe("planned search execution", () => {
     });
 
     expect(results.map((result) => result.url)).toEqual(["https://example.com/ddg"]);
+    expect(brave.execute).toHaveBeenCalledTimes(1);
+    expect(google.execute).toHaveBeenCalledTimes(1);
+    expect(bing.execute).toHaveBeenCalledTimes(1);
+    expect(duckduckgo.execute).toHaveBeenCalledTimes(1);
+  });
+
+  it("continues through secondary providers when domain filtering rejects earlier results", async () => {
+    const brave = provider("brave", ["https://example.com/brave"]);
+    const google = provider("google", ["https://example.org/google"]);
+    const bing = provider("bing", ["https://example.net/bing"]);
+    const duckduckgo = provider("duckduckgo", ["https://react.dev/reference"]);
+
+    const results = await executeSearchPlan({
+      providers: [duckduckgo, bing, brave, google],
+      query: "react reference site:react.dev",
+      locale,
+      plan: plan(),
+      healthTracker: new ProviderHealthTracker(),
+      resultFilter: (rows) => filterSearchResultsByDomain(rows, "react.dev"),
+    });
+
+    expect(results.map((result) => result.url)).toEqual(["https://react.dev/reference"]);
     expect(brave.execute).toHaveBeenCalledTimes(1);
     expect(google.execute).toHaveBeenCalledTimes(1);
     expect(bing.execute).toHaveBeenCalledTimes(1);
