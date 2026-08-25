@@ -6,6 +6,7 @@ import { fuseSearchResults } from "./fusion.js";
 import type { SearchPlan } from "./planner.js";
 
 export type SearchStrategy = "fallback" | "aggregate";
+export type SearchResultFilter = (results: SearchResultItem[]) => SearchResultItem[];
 
 export type ExecuteProviderSearchOptions = {
   providers: SearchProvider[];
@@ -13,6 +14,7 @@ export type ExecuteProviderSearchOptions = {
   locale: SearchLocale;
   strategy: SearchStrategy;
   healthTracker: ProviderHealthTracker;
+  resultFilter?: SearchResultFilter;
 };
 
 export type ExecuteSearchPlanOptions = {
@@ -21,6 +23,7 @@ export type ExecuteSearchPlanOptions = {
   locale: SearchLocale;
   plan: SearchPlan;
   healthTracker: ProviderHealthTracker;
+  resultFilter?: SearchResultFilter;
 };
 
 function dedupeProviderResults(results: SearchResultItem[]): SearchResultItem[] {
@@ -53,6 +56,13 @@ function providersInPlanOrder(
   return providerNames
     .map((name) => byName.get(name))
     .filter((provider): provider is SearchProvider => provider !== undefined);
+}
+
+function applyResultFilter(
+  results: SearchResultItem[],
+  resultFilter?: SearchResultFilter,
+): SearchResultItem[] {
+  return resultFilter ? resultFilter(results) : results;
 }
 
 async function runProvider(
@@ -99,10 +109,14 @@ export async function executeProviderSearch({
   locale,
   strategy,
   healthTracker,
+  resultFilter,
 }: ExecuteProviderSearchOptions): Promise<SearchResultItem[]> {
   if (strategy === "fallback") {
     for (const provider of providers) {
-      const results = await runProvider(provider, query, locale, healthTracker);
+      const results = applyResultFilter(
+        await runProvider(provider, query, locale, healthTracker),
+        resultFilter,
+      );
       if (results.length > 0) return results;
     }
     return [];
@@ -112,7 +126,10 @@ export async function executeProviderSearch({
   const settled = await Promise.all(
     aggregateProviders.map(async (provider) => ({
       provider: provider.name,
-      results: await runProvider(provider, query, locale, healthTracker),
+      results: applyResultFilter(
+        await runProvider(provider, query, locale, healthTracker),
+        resultFilter,
+      ),
     }))
   );
 
@@ -127,6 +144,7 @@ export async function executeSearchPlan({
   locale,
   plan,
   healthTracker,
+  resultFilter,
 }: ExecuteSearchPlanOptions): Promise<SearchResultItem[]> {
   const primaryProviders = providersInPlanOrder(providers, plan.primaryProviderNames);
   const primaryResults = await executeProviderSearch({
@@ -135,6 +153,7 @@ export async function executeSearchPlan({
     locale,
     strategy: plan.strategy,
     healthTracker,
+    resultFilter,
   });
 
   if (
@@ -152,5 +171,6 @@ export async function executeSearchPlan({
     locale,
     strategy: "fallback",
     healthTracker,
+    resultFilter,
   });
 }
