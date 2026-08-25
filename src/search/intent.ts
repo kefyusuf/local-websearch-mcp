@@ -49,25 +49,36 @@ export type PipelineLoader = (
 
 export class SearchIntentClassifier implements IntentClassifier {
   private classifier: ZeroShotRunner | null = null;
-  private classifierFailed = false;
+  private classifierLoadFailed = false;
 
   constructor(
     private readonly modelName = "Xenova/nli-deberta-v3-xsmall",
     private readonly loadPipeline: PipelineLoader = pipeline as unknown as PipelineLoader,
   ) {}
 
-  async classify(query: string): Promise<SearchIntent> {
-    if (this.classifierFailed) return "general";
+  private async getClassifier(): Promise<ZeroShotRunner | null> {
+    if (this.classifierLoadFailed) return null;
+    if (this.classifier) return this.classifier;
 
     try {
-      if (!this.classifier) {
-        this.classifier = await this.loadPipeline("zero-shot-classification", this.modelName);
-      }
-      const output = await this.classifier(query, LABELS);
+      this.classifier = await this.loadPipeline("zero-shot-classification", this.modelName);
+      return this.classifier;
+    } catch (error) {
+      this.classifierLoadFailed = true;
+      console.error("Intent classification model permanently failed:", error);
+      return null;
+    }
+  }
+
+  async classify(query: string): Promise<SearchIntent> {
+    const classifier = await this.getClassifier();
+    if (!classifier) return "general";
+
+    try {
+      const output = await classifier(query, LABELS);
       return LABEL_TO_INTENT[output.labels[0]] ?? "general";
     } catch (error) {
-      this.classifierFailed = true;
-      console.error("Intent classification model permanently failed:", error);
+      console.error("Intent classification error:", error);
       return "general";
     }
   }
