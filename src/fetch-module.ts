@@ -197,6 +197,7 @@ export class ContentFetcher {
     try {
       let response;
       const waitUntil = options.useConfiguredWaitUntil ? this.fetchWaitUntil : "domcontentloaded";
+
       await page.route("**/*", async (route) => {
         const requestUrl = route.request().url();
         if (await this.isFetchUrlAllowed(requestUrl)) {
