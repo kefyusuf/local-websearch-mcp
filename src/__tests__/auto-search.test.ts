@@ -4,7 +4,7 @@ import type { SearchProvider } from "../providers/base.js";
 import { ProviderHealthTracker } from "../providers/health.js";
 import { executeSearchPlan } from "../search/executor.js";
 import type { SearchPlan } from "../search/planner.js";
-import { filterSearchResultsByDomain, type SearchLocale } from "../search-utils.js";
+import type { SearchLocale } from "../search-utils.js";
 
 const locale: SearchLocale = {
   acceptLanguage: "en-US,en;q=0.9",
@@ -75,7 +75,7 @@ describe("planned search execution", () => {
     expect(duckduckgo.execute).toHaveBeenCalledTimes(1);
   });
 
-  it("continues through secondary providers when domain filtering rejects earlier results", async () => {
+  it("continues through secondary providers when site filtering rejects earlier results", async () => {
     const brave = provider("brave", ["https://example.com/brave"]);
     const google = provider("google", ["https://example.org/google"]);
     const bing = provider("bing", ["https://example.net/bing"]);
@@ -87,7 +87,6 @@ describe("planned search execution", () => {
       locale,
       plan: plan(),
       healthTracker: new ProviderHealthTracker(),
-      resultFilter: (rows) => filterSearchResultsByDomain(rows, "react.dev"),
     });
 
     expect(results.map((result) => result.url)).toEqual(["https://react.dev/reference"]);
