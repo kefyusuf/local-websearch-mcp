@@ -84,6 +84,12 @@ try {
   assertIncludes(toolNames, "fetch_content", "tools/list");
   assertIncludes(toolNames, "server_status", "tools/list");
 
+  const webSearchTool = tools.result.tools.find((tool) => tool.name === "web_search");
+  const strategyEnum = webSearchTool?.inputSchema?.properties?.strategy?.enum ?? [];
+  for (const strategy of ["fallback", "aggregate", "auto"]) {
+    assertIncludes(strategyEnum, strategy, "web_search strategy enum");
+  }
+
   const status = await request("tools/call", {
     name: "server_status",
     arguments: {},
@@ -177,6 +183,16 @@ function assertHasStatusShape(status) {
 
   if (!status.config || !Array.isArray(status.config.searchProviders) || typeof status.config.fetchWaitUntil !== "string") {
     fail("server_status did not include runtime config.");
+  }
+
+  if (status.config.searchStrategyDefault !== "fallback") {
+    fail(`server_status default search strategy changed: ${status.config.searchStrategyDefault}`);
+  }
+  if (status.config.autoRouting !== "available") {
+    fail("server_status did not report auto routing availability.");
+  }
+  if (status.config.routingProfileVersion !== "v1") {
+    fail(`server_status routing profile mismatch: ${status.config.routingProfileVersion}`);
   }
 }
 
