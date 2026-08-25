@@ -1,7 +1,7 @@
 import type { SearchResultItem } from "../cache/types.js";
 import type { SearchProvider } from "../providers/base.js";
 import type { ProviderHealthTracker } from "../providers/health.js";
-import type { SearchLocale } from "../search-utils.js";
+import { filterSearchResultsByDomain, type SearchLocale } from "../search-utils.js";
 import { fuseSearchResults } from "./fusion.js";
 import type { SearchPlan } from "./planner.js";
 
@@ -63,6 +63,14 @@ function applyResultFilter(
   resultFilter?: SearchResultFilter,
 ): SearchResultItem[] {
   return resultFilter ? resultFilter(results) : results;
+}
+
+function inferSiteResultFilter(query: string): SearchResultFilter | undefined {
+  const match = query.match(/(?:^|\s)site:([^\s]+)\s*$/i);
+  const domain = match?.[1];
+  return domain
+    ? (results) => filterSearchResultsByDomain(results, domain)
+    : undefined;
 }
 
 async function runProvider(
@@ -146,6 +154,7 @@ export async function executeSearchPlan({
   healthTracker,
   resultFilter,
 }: ExecuteSearchPlanOptions): Promise<SearchResultItem[]> {
+  const effectiveResultFilter = resultFilter ?? inferSiteResultFilter(query);
   const primaryProviders = providersInPlanOrder(providers, plan.primaryProviderNames);
   const primaryResults = await executeProviderSearch({
     providers: primaryProviders,
@@ -153,7 +162,7 @@ export async function executeSearchPlan({
     locale,
     strategy: plan.strategy,
     healthTracker,
-    resultFilter,
+    resultFilter: effectiveResultFilter,
   });
 
   if (
@@ -171,6 +180,6 @@ export async function executeSearchPlan({
     locale,
     strategy: "fallback",
     healthTracker,
-    resultFilter,
+    resultFilter: effectiveResultFilter,
   });
 }
