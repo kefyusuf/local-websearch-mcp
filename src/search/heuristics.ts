@@ -55,7 +55,7 @@ const RULES: HeuristicRule[] = [
     intent: "research",
     patterns: [
       /\b(landscape|market share|adoption|survey|evidence|benchmark|industry analysis)\b/i,
-      /\b(pazar payı|benimsenme|araştırma|anket|kanıt|sektör analizi)\b/i,
+      /(?:pazar payı|benimsenme|araştırma|anket|kanıt|sektör analizi)/i,
     ],
   },
 ];
