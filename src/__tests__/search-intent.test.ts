@@ -87,4 +87,26 @@ describe("search intent detection", () => {
     expect(loader).toHaveBeenCalledTimes(1);
     expect(runner).toHaveBeenCalledTimes(2);
   });
+
+  it("shares one in-flight model load across concurrent classifications", async () => {
+    const runner = vi.fn(async () => ({
+      labels: ["research comparison and evidence gathering"],
+      scores: [0.9],
+    }));
+    let resolveLoad!: (value: typeof runner) => void;
+    const pendingLoad = new Promise<typeof runner>((resolve) => {
+      resolveLoad = resolve;
+    });
+    const loader = vi.fn(() => pendingLoad);
+    const classifier = new SearchIntentClassifier("test-model", loader);
+
+    const first = classifier.classify("database platform options");
+    const second = classifier.classify("storage platform options");
+    await Promise.resolve();
+
+    expect(loader).toHaveBeenCalledTimes(1);
+    resolveLoad(runner);
+    await expect(Promise.all([first, second])).resolves.toEqual(["research", "research"]);
+    expect(runner).toHaveBeenCalledTimes(2);
+  });
 });
