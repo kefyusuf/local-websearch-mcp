@@ -7,6 +7,7 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 - Browser context pooling with a persistent Playwright browser instance.
 - Web search through configurable providers with health tracking and ordered fallback.
 - Optional federated search across all configured providers with URL normalization, cross-provider deduplication, and Reciprocal Rank Fusion (RRF).
+- Opt-in intent-aware search routing with conservative heuristics, local classifier fallback, and versioned provider profiles.
 - Domain-filtered web search for targeted site queries.
 - HTTP-first page fetching with GitHub Raw and RSS fast paths plus Playwright fallback for rendered pages.
 - SSRF protection for `fetch_content` by blocking localhost and private network targets.
@@ -28,7 +29,7 @@ npm install
 npm run build
 ```
 
-The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache. Keep `ENABLE_CROSSLINGUAL=false` for the lightest first run.
+The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache. Keep `ENABLE_CROSSLINGUAL=false` for the lightest first run. Obvious `strategy=auto` intents are resolved by heuristics without loading the intent classifier; ambiguous auto queries may trigger a first-run classifier download.
 
 ## MCP Client Configuration
 
@@ -75,30 +76,63 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 | Tool | Description |
 | --- | --- |
-| `web_search` | Searches the web and returns ranked results. Set `strategy=aggregate` for federated multi-provider search, `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
+| `web_search` | Searches the web and returns ranked results. Use `strategy=auto` for intent-aware provider planning, `strategy=aggregate` for all-provider federated search, `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with content caching, charset handling, GitHub Raw fast paths, RSS feed extraction, and Playwright fallback. |
-| `server_status` | Returns provider availability, cache stats, browser state, feature flags, and uptime. |
+| `server_status` | Returns provider availability, cache stats, browser state, routing profile metadata, feature flags, and uptime. |
 
-`web_search` supports two execution strategies:
+### Search strategies
 
-- `fallback` (default): tries `SEARCH_PROVIDERS` in order and stops after the first provider that returns usable results. This preserves the original low-latency behavior.
-- `aggregate`: queries every currently available configured provider in parallel, canonicalizes URLs, removes cross-provider duplicates, and merges provider rankings with RRF before the existing semantic re-ranking stage.
+| Strategy | Behavior | Semantic query cache |
+| --- | --- | --- |
+| `fallback` **(default)** | Tries configured providers in order and stops at the first usable result set. | Enabled |
+| `aggregate` | Queries all currently available configured providers in parallel, deduplicates URLs, and fuses rankings with RRF. | Bypassed |
+| `auto` | Detects intent, builds a routing plan from profile `v1`, then delegates to the existing fallback/aggregate executor. | Bypassed |
 
-Aggregate mode intentionally bypasses the semantic **query** cache for now because the cache does not yet namespace entries by search strategy. Deep-search page content still uses the normal content cache.
+`auto` is deliberately opt-in; omitting `strategy` still uses `fallback` for backward compatibility. The semantic query cache is bypassed for `aggregate` and `auto` because query-cache keys are not yet namespaced by execution strategy/provider plan. Deep-search page content continues to use the normal content cache.
 
-Use `domain` for targeted searches such as `react.dev` or `github.com`. Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+`SEARCH_PROVIDERS` is an **allowlist** as well as the configured provider set. Auto routing never activates a provider omitted from `SEARCH_PROVIDERS`; the routing profile only changes ordering and how many configured providers are selected as primary candidates.
 
-Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
+For aggregate auto profiles, secondary configured providers are contacted only if **all** selected primary providers return no usable result. A partial primary success is accepted instead of widening the request just to increase result count. This limits scraping load and reduces unnecessary blocking/CAPTCHA exposure.
 
-Example targeted search arguments:
+Current routing profile: `v1`.
+
+| Intent | Execution | Preferred order | Primary target |
+| --- | --- | --- | ---: |
+| `technical` | aggregate | brave, google, bing, duckduckgo | 2 |
+| `research` | aggregate | brave, google, bing, duckduckgo | 3 |
+| `news` | aggregate | google, bing, brave, duckduckgo | 3 |
+| `commercial` | aggregate | brave, google, bing, duckduckgo | 3 |
+| `shopping` | aggregate | google, bing, duckduckgo, brave | 2 |
+| `local` | aggregate | google, bing, duckduckgo, brave | 2 |
+| `navigational` | fallback | google, bing, duckduckgo, brave | all configured |
+| `general` | fallback | existing configured order | all configured |
+
+These provider preferences are initial hypotheses, not permanent quality claims. They are versioned so later releases can tune them from deterministic and live evaluation evidence without scattering routing conditionals through the server.
+
+Example intent-aware search arguments:
+
+```json
+{
+  "query": "PostgreSQL connection pooling best practices",
+  "strategy": "auto",
+  "max_results": 5
+}
+```
+
+Use `domain` for targeted searches such as `react.dev` or `github.com`. Intent detection always receives the original query; `site:<domain>` is appended only afterward for provider execution.
 
 ```json
 {
   "query": "server components reference",
   "domain": "react.dev",
+  "strategy": "auto",
   "max_results": 5
 }
 ```
+
+Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+
+Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
 
 Example federated search arguments:
 
@@ -122,8 +156,8 @@ Example federated search arguments:
 | --- | --- | --- |
 | `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
 | `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
-| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider order for `fallback` and provider set for `aggregate`. Supported values: `duckduckgo`, `bing`, `brave`, `google`. |
-| `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. |
+| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`. `fallback` preserves this order; `aggregate` uses all configured providers; `auto` intersects profile preferences with this set. |
+| `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. When disabled, query heuristics still infer supported locales such as Turkish. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
 | `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
@@ -149,14 +183,17 @@ npm audit --audit-level=moderate
 npm pack --dry-run --json
 ```
 
-`npm run smoke:mcp` starts the compiled server over stdio, verifies `tools/list`, calls `server_status`, and confirms that `fetch_content` blocks localhost.
+`npm run smoke:mcp` starts the compiled server over stdio, verifies the three `web_search` strategy values (`fallback`, `aggregate`, `auto`), checks routing diagnostics from `server_status`, and confirms that `fetch_content` blocks localhost. It does not perform a live provider search, keeping CI independent of search-engine HTML/network availability.
+
+Deterministic TR/EN routing fixtures live in `evals/search-routing/queries.jsonl` and are exercised by the normal Vitest suite. They validate intent coverage, conservative heuristic behavior, ambiguity defer cases, and provider-allowlist enforcement without loading the real classifier or contacting providers.
 
 ## Troubleshooting
 
 - If startup fails after install, run `npx playwright install chromium`.
-- If the first model-backed request is slow, wait for the Transformers.js model download to finish and retry.
-- If search returns no results, change `SEARCH_PROVIDERS` order or try a direct `fetch_content` URL.
+- If the first model-backed request is slow, allow the Transformers.js model download to complete and retry.
+- If search returns no results, change `SEARCH_PROVIDERS` order/set or try a direct `fetch_content` URL.
 - If aggregate mode is too slow or triggers provider blocking, use the default `fallback` strategy.
+- If `auto` chooses too broad a search plan for your use case, use explicit `fallback` or `aggregate`; explicit strategies bypass the auto planner.
 - If Docker cannot find Chromium, rebuild the image with `npm run docker:build`.
 - If cache files appear in the project root, set `CACHE_DB_PATH` to a dedicated data directory.
 

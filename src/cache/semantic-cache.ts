@@ -1,5 +1,5 @@
 import { IEmbeddingProvider, IVectorStore, SearchResultItem, CacheMetadata } from "./types.js";
-import { SearchIntentClassifier, SearchIntent } from "./intent.js";
+import { SearchIntentDetector, type IntentDetector, type SearchIntent } from "../search/intent.js";
 import { cosineSimilarity } from "./utils.js";
 
 const TTL_MAP: Record<string, number> = {
@@ -18,22 +18,23 @@ const FUSION_RANK_WEIGHT = 0.3;
 export class SemanticCache {
   private embeddingProvider: IEmbeddingProvider;
   private vectorStore: IVectorStore;
-  private intentClassifier: SearchIntentClassifier;
+  private intentDetector: IntentDetector;
   private threshold: number;
 
   constructor(
     embeddingProvider: IEmbeddingProvider,
     vectorStore: IVectorStore,
-    threshold: number = 0.75
+    threshold: number = 0.75,
+    intentDetector: IntentDetector = new SearchIntentDetector(),
   ) {
     this.embeddingProvider = embeddingProvider;
     this.vectorStore = vectorStore;
-    this.intentClassifier = new SearchIntentClassifier();
+    this.intentDetector = intentDetector;
     this.threshold = threshold;
   }
 
   async detectIntent(query: string): Promise<SearchIntent> {
-    return await this.intentClassifier.classify(query);
+    return (await this.intentDetector.detect(query)).intent;
   }
 
   close(): void {
@@ -141,12 +142,12 @@ export class SemanticCache {
 
   private detectCategory(url: string, title: string): string {
     const combined = (url + " " + title).toLowerCase();
-    
+
     if (/\b(docs|wiki|tutorial|learn|documentation|guide|stackoverflow|api)\b/.test(combined)) return "docs";
     if (/\b(news|haber|breaking|daily|journal|gazete)\b/.test(combined)) return "news";
     if (/\b(reddit|forum|community|discord)\b/.test(combined)) return "social";
     if (/\b(blog|article|medium\.com|substack)\b/.test(combined)) return "blog";
-    
+
     return "general";
   }
 
@@ -191,5 +192,4 @@ export class SemanticCache {
       return results.slice(0, limit);
     }
   }
-
 }

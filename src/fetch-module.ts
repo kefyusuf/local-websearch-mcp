@@ -4,7 +4,7 @@ import { LRUCache } from "lru-cache";
 import type { BrowserContext } from "playwright";
 import TurndownService from "turndown";
 import iconv from "iconv-lite";
-import type { SearchIntent } from "./cache/intent.js";
+import type { SearchIntent } from "./search/intent.js";
 import type { SemanticCache } from "./cache/semantic-cache.js";
 import { validatePublicHttpUrl } from "./ssrf.js";
 

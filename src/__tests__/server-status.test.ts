@@ -33,6 +33,9 @@ describe("WebSearchServer diagnostics", () => {
     });
     expect(status.config).toMatchObject({
       searchProviders: ["mock"],
+      searchStrategyDefault: "fallback",
+      autoRouting: "available",
+      routingProfileVersion: "v1",
       fetchWaitUntil: "domcontentloaded",
       forcePlaywright: true,
       cacheDbPath: ":memory:",

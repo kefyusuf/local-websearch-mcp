@@ -31,13 +31,14 @@ describe("SearchSchema", () => {
     });
   });
 
-  it("accepts fallback and aggregate search strategies", () => {
+  it("accepts fallback, aggregate, and auto search strategies", () => {
     expect(SearchSchema.parse({ query: "test", strategy: "fallback" }).strategy).toBe("fallback");
     expect(SearchSchema.parse({ query: "test", strategy: "aggregate" }).strategy).toBe("aggregate");
+    expect(SearchSchema.parse({ query: "test", strategy: "auto" }).strategy).toBe("auto");
   });
 
   it("rejects unsupported search strategies", () => {
-    expect(() => SearchSchema.parse({ query: "test", strategy: "auto" })).toThrowError(ZodError);
+    expect(() => SearchSchema.parse({ query: "test", strategy: "adaptive" })).toThrowError(ZodError);
   });
 
   it("rejects max_results above the upper bound", () => {
