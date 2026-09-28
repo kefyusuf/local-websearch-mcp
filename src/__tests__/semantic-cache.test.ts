@@ -116,4 +116,39 @@ describe("SemanticCache", () => {
     expect(hit).not.toBeNull();
     expect(lazyProvider.getEmbedding).toHaveBeenCalled();
   });
+
+  it("isolates cache hits by execution namespace", async () => {
+    const mockEmbed = createMockEmbedding({
+      "postgres pooling": makeVec([1, 0]),
+    });
+    cache = new SemanticCache(mockEmbed, store, 0.70);
+
+    await cache.set("postgres pooling", [{ title: "Fallback hit", url: "https://a.example", snippet: "s", source: "test" }], "fallback");
+    await cache.set("postgres pooling", [{ title: "Aggregate hit", url: "https://b.example", snippet: "s", source: "test" }], "aggregate");
+
+    const fallbackHit = await cache.get("postgres pooling", "fallback");
+    const aggregateHit = await cache.get("postgres pooling", "aggregate");
+    const autoMiss = await cache.get("postgres pooling", "auto:v1:technical:searxng,brave");
+
+    expect(fallbackHit?.[0].title).toBe("Fallback hit");
+    expect(aggregateHit?.[0].title).toBe("Aggregate hit");
+    expect(autoMiss).toBeNull();
+  });
+
+  it("treats legacy entries without a namespace as fallback", async () => {
+    const mockEmbed = createMockEmbedding({
+      "weather london": makeVec([1, 0]),
+    });
+    cache = new SemanticCache(mockEmbed, store, 0.70);
+
+    // Simulate a pre-upgrade cache entry with no namespace field.
+    await store.add("legacy-id", makeVec([1, 0]), {
+      query: "weather london",
+      results: [{ title: "Legacy", url: "https://legacy.example", snippet: "s", source: "test" }],
+      timestamp: Date.now(),
+    });
+
+    const hit = await cache.get("weather london", "fallback");
+    expect(hit?.[0].title).toBe("Legacy");
+  });
 });

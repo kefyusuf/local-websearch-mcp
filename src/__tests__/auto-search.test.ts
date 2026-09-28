@@ -127,7 +127,7 @@ describe("WebSearchServer auto routing", () => {
     vi.restoreAllMocks();
   });
 
-  it("classifies the original query, routes primary providers, and bypasses semantic query cache", async () => {
+  it("classifies the original query, routes primary providers, and uses plan-aware cache", async () => {
     vi.stubEnv("NODE_ENV", "test");
     vi.stubEnv("CACHE_DB_PATH", ":memory:");
     vi.stubEnv("ENABLE_CROSSLINGUAL", "false");
@@ -148,8 +148,8 @@ describe("WebSearchServer auto routing", () => {
       set: (...args: unknown[]) => Promise<void>;
       reRankResults: (query: string, results: unknown[], limit: number) => Promise<unknown[]>;
     } }).cache;
-    const cacheGet = vi.spyOn(cache, "get");
-    const cacheSet = vi.spyOn(cache, "set");
+    const cacheGet = vi.spyOn(cache, "get").mockResolvedValue(null);
+    const cacheSet = vi.spyOn(cache, "set").mockResolvedValue(undefined as never);
     vi.spyOn(cache, "reRankResults").mockImplementation(async (_query, results, limit) => results.slice(0, limit));
 
     const response = await callPrivate<{ content: Array<{ text: string }> }>(server, "handleSearch", [{
@@ -161,8 +161,18 @@ describe("WebSearchServer auto routing", () => {
 
     expect(response.content[0].text).toContain("react.dev");
     expect(detector.detect).toHaveBeenCalledWith("react server components");
-    expect(cacheGet).not.toHaveBeenCalled();
-    expect(cacheSet).not.toHaveBeenCalled();
+
+    // Cache is now plan-aware: lookups/stores are namespaced by intent + profile + providers.
+    expect(cacheGet).toHaveBeenCalledWith(
+      "react server components domain:react.dev",
+      expect.stringContaining("auto:v1:technical:"),
+    );
+    expect(cacheSet).toHaveBeenCalledWith(
+      "react server components domain:react.dev",
+      expect.any(Array),
+      expect.stringContaining("auto:v1:technical:"),
+    );
+
     expect(brave.execute).toHaveBeenCalledWith("react server components site:react.dev", expect.any(Object));
     expect(google.execute).toHaveBeenCalledWith("react server components site:react.dev", expect.any(Object));
     expect(duckduckgo.execute).not.toHaveBeenCalled();

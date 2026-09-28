@@ -22,6 +22,8 @@ export interface CacheMetadata {
   query: string;
   results: SearchResultItem[];
   timestamp: number;
+  /** Execution namespace (strategy + plan fingerprint) so different strategies do not share hits. */
+  namespace?: string;
 }
 
 export interface IEmbeddingProvider {

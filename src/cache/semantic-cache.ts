@@ -49,22 +49,26 @@ export class SemanticCache {
 
   // --- Semantic Search Cache ---
 
-  async get(query: string): Promise<SearchResultItem[] | null> {
+  async get(query: string, namespace?: string): Promise<SearchResultItem[] | null> {
     try {
       const vector = await this.getQueryVector(query);
       if (!vector) return null;
 
-      const matches = await this.vectorStore.search(vector, 1);
+      const matches = await this.vectorStore.search(vector, 5);
 
-      if (matches.length > 0 && matches[0].score >= this.threshold) {
+      for (const match of matches) {
+        if (match.score < this.threshold) continue;
+        const matchNamespace = match.metadata.namespace ?? "fallback";
+        if (namespace && matchNamespace !== namespace) continue;
+
         // Check TTL: cached search results expire after 1 hour
-        const age = Date.now() - matches[0].metadata.timestamp;
+        const age = Date.now() - match.metadata.timestamp;
         if (age > 60 * 60 * 1000) {
           console.error(`Cache expired (age: ${Math.round(age / 1000 / 60)}m)`);
           return null;
         }
-        console.error(`Cache Hit! Similarity: ${matches[0].score.toFixed(4)}`);
-        return matches[0].metadata.results;
+        console.error(`Cache Hit! Similarity: ${match.score.toFixed(4)} namespace: ${matchNamespace}`);
+        return match.metadata.results;
       }
     } catch (error) {
       console.error("Cache lookup error:", error);
@@ -72,17 +76,19 @@ export class SemanticCache {
     return null;
   }
 
-  async set(query: string, results: SearchResultItem[]): Promise<void> {
+  async set(query: string, results: SearchResultItem[], namespace?: string): Promise<void> {
     try {
       const vector = await this.getQueryVector(query);
       if (!vector) return;
 
-      const normalized = query.trim().toLowerCase();
+      const ns = namespace ?? "fallback";
+      const normalized = `${ns}|${query.trim().toLowerCase()}`;
       const id = Buffer.from(normalized).toString("base64");
       const metadata: CacheMetadata = {
         query,
         results,
         timestamp: Date.now(),
+        namespace: ns,
       };
       await this.vectorStore.add(id, vector, metadata);
     } catch (error) {

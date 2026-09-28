@@ -14,6 +14,12 @@ coverage/
 # Local agent and review artifacts
 .ai/
 .claude/
+.playwright-mcp/
+.build-shim/
+
+# Local tooling output
+*-out.txt
+*-err.txt
 AGENTS.md
 PLAN.md
 REVIEW.md

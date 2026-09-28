@@ -14,37 +14,37 @@ export type RoutingProfile = {
 export const ROUTING_PROFILES: Record<SearchIntent, RoutingProfile> = {
   technical: {
     strategy: "aggregate",
-    preference: ["brave", "google", "bing", "duckduckgo"],
+    preference: ["searxng", "brave", "google", "bing", "duckduckgo"],
     primaryTarget: 2,
   },
   research: {
     strategy: "aggregate",
-    preference: ["brave", "google", "bing", "duckduckgo"],
+    preference: ["searxng", "brave", "google", "bing", "duckduckgo"],
     primaryTarget: 3,
   },
   news: {
     strategy: "aggregate",
-    preference: ["google", "bing", "brave", "duckduckgo"],
+    preference: ["searxng", "google", "bing", "brave", "duckduckgo"],
     primaryTarget: 3,
   },
   commercial: {
     strategy: "aggregate",
-    preference: ["brave", "google", "bing", "duckduckgo"],
+    preference: ["searxng", "brave", "google", "bing", "duckduckgo"],
     primaryTarget: 3,
   },
   shopping: {
     strategy: "aggregate",
-    preference: ["google", "bing", "duckduckgo", "brave"],
+    preference: ["google", "bing", "searxng", "duckduckgo", "brave"],
     primaryTarget: 2,
   },
   local: {
     strategy: "aggregate",
-    preference: ["google", "bing", "duckduckgo", "brave"],
+    preference: ["google", "bing", "searxng", "duckduckgo", "brave"],
     primaryTarget: 2,
   },
   navigational: {
     strategy: "fallback",
-    preference: ["google", "bing", "duckduckgo", "brave"],
+    preference: ["google", "bing", "searxng", "duckduckgo", "brave"],
     primaryTarget: "all",
   },
   general: {

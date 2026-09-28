@@ -5,7 +5,7 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 ## Features
 
 - Browser context pooling with a persistent Playwright browser instance.
-- Web search through configurable providers with health tracking and ordered fallback.
+- Web search through configurable providers with health tracking and ordered fallback. Supported scrapers: DuckDuckGo, Bing, Brave, Google. Optional SearXNG meta-search provider (self-hosted or trusted public instance) via `SEARXNG_BASE_URL`.
 - Optional federated search across all configured providers with URL normalization, cross-provider deduplication, and Reciprocal Rank Fusion (RRF).
 - Opt-in intent-aware search routing with conservative heuristics, local classifier fallback, and versioned provider profiles.
 - Domain-filtered web search for targeted site queries.
@@ -15,6 +15,7 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 - Semantic cache backed by SQLite and `sqlite-vec`.
 - Optional cross-lingual query expansion with local Transformers.js models.
 - Clean Markdown extraction through Readability, JSDOM, and Turndown.
+- Deep-search answers with paragraph/sentence term scoring, stopword filtering, and per-source citations.
 
 ## Requirements
 
@@ -84,11 +85,11 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 | Strategy | Behavior | Semantic query cache |
 | --- | --- | --- |
-| `fallback` **(default)** | Tries configured providers in order and stops at the first usable result set. | Enabled |
-| `aggregate` | Queries all currently available configured providers in parallel, deduplicates URLs, and fuses rankings with RRF. | Bypassed |
-| `auto` | Detects intent, builds a routing plan from profile `v1`, then delegates to the existing fallback/aggregate executor. | Bypassed |
+| `fallback` **(default)** | Tries configured providers in order and stops at the first usable result set. | Enabled (namespace: `fallback`) |
+| `aggregate` | Queries all currently available configured providers in parallel, deduplicates URLs, and fuses rankings with RRF. | Enabled (namespace: `aggregate`) |
+| `auto` | Detects intent, builds a routing plan from profile `v1`, then delegates to the existing fallback/aggregate executor. | Enabled (namespace: `auto:{profile}:{intent}:{providers}`) |
 
-`auto` is deliberately opt-in; omitting `strategy` still uses `fallback` for backward compatibility. The semantic query cache is bypassed for `aggregate` and `auto` because query-cache keys are not yet namespaced by execution strategy/provider plan. Deep-search page content continues to use the normal content cache.
+Semantic query cache keys are namespaced by execution strategy (and by plan fingerprint for `auto`), so a cached `fallback` result is never reused for `aggregate` or a different auto plan. Deep-search page content continues to use the normal content cache.
 
 `SEARCH_PROVIDERS` is an **allowlist** as well as the configured provider set. Auto routing never activates a provider omitted from `SEARCH_PROVIDERS`; the routing profile only changes ordering and how many configured providers are selected as primary candidates.
 
@@ -98,13 +99,13 @@ Current routing profile: `v1`.
 
 | Intent | Execution | Preferred order | Primary target |
 | --- | --- | --- | ---: |
-| `technical` | aggregate | brave, google, bing, duckduckgo | 2 |
-| `research` | aggregate | brave, google, bing, duckduckgo | 3 |
-| `news` | aggregate | google, bing, brave, duckduckgo | 3 |
-| `commercial` | aggregate | brave, google, bing, duckduckgo | 3 |
-| `shopping` | aggregate | google, bing, duckduckgo, brave | 2 |
-| `local` | aggregate | google, bing, duckduckgo, brave | 2 |
-| `navigational` | fallback | google, bing, duckduckgo, brave | all configured |
+| `technical` | aggregate | searxng, brave, google, bing, duckduckgo | 2 |
+| `research` | aggregate | searxng, brave, google, bing, duckduckgo | 3 |
+| `news` | aggregate | searxng, google, bing, brave, duckduckgo | 3 |
+| `commercial` | aggregate | searxng, brave, google, bing, duckduckgo | 3 |
+| `shopping` | aggregate | google, bing, searxng, duckduckgo, brave | 2 |
+| `local` | aggregate | google, bing, searxng, duckduckgo, brave | 2 |
+| `navigational` | fallback | google, bing, searxng, duckduckgo, brave | all configured |
 | `general` | fallback | existing configured order | all configured |
 
 These provider preferences are initial hypotheses, not permanent quality claims. They are versioned so later releases can tune them from deterministic and live evaluation evidence without scattering routing conditionals through the server.
@@ -130,7 +131,7 @@ Use `domain` for targeted searches such as `react.dev` or `github.com`. Intent d
 }
 ```
 
-Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. The MCP client LLM remains responsible for final reasoning and summarization.
+Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. Answers include per-source citations (`[Source N]`) mapped to the fetched URLs. The MCP client LLM remains responsible for final reasoning and summarization.
 
 Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
 
@@ -156,7 +157,8 @@ Example federated search arguments:
 | --- | --- | --- |
 | `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
 | `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
-| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`. `fallback` preserves this order; `aggregate` uses all configured providers; `auto` intersects profile preferences with this set. |
+| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`, `searxng`. `fallback` preserves this order; `aggregate` uses all configured providers; `auto` intersects profile preferences with this set. |
+| `SEARXNG_BASE_URL` | unset | Base URL of a SearXNG instance with the JSON format enabled (for example `https://searx.example.com`). Required for the `searxng` provider; no API key is used. |
 | `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. When disabled, query heuristics still infer supported locales such as Turkish. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |

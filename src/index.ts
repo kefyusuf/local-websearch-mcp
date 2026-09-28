@@ -8,7 +8,7 @@ import {
 import { pathToFileURL } from "node:url";
 import { chromium, Browser, BrowserContext } from "playwright";
 import { z } from "zod";
-import { extractAnswerFromContent, formatSearchResults } from "./answer-extraction.js";
+import { extractAnswerFromDocuments, formatSearchResults } from "./answer-extraction.js";
 import { validatePublicHttpUrl } from "./ssrf.js";
 import { TransformersEmbeddingProvider } from "./cache/embedding.js";
 import { SQLiteVectorStore } from "./cache/sqlite-store.js";
@@ -285,27 +285,12 @@ export class WebSearchServer {
       : null;
     const queryLocale = resolveSearchLocale(query, detectedLanguage);
 
-    // The semantic query cache currently has no strategy/provider-plan namespace.
-    // Keep it only on the legacy fallback path. Aggregate and auto both bypass it;
-    // deep page-content caching remains unchanged.
-    const useSemanticSearchCache = strategy === "fallback";
-    const cached = useSemanticSearchCache ? await this.cache.get(cacheKey) : null;
-
-    if (cached !== null && cached.length > 0) {
-      console.error(`Semantic cache hit for query: ${query}`);
-      if (deep) {
-        return this.buildSearchResponse(query, cached.slice(0, max_results));
-      }
-      const reranked = await this.cache.reRankResults(query, cached, max_results);
-      return {
-        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
-      };
-    }
-
-    let rawResults: SearchResultItem[];
+    // Resolve auto planning up front so cache lookups can be namespaced by the
+    // actual plan instead of bypassing the cache for non-fallback strategies.
+    let searchPlan: ReturnType<typeof planSearch> | null = null;
     if (strategy === "auto") {
       const detection = await this.intentDetector.detect(query);
-      const searchPlan = planSearch({
+      searchPlan = planSearch({
         intent: detection.intent,
         configuredProviderNames: this.providers.map((provider) => provider.name),
       });
@@ -316,6 +301,26 @@ export class WebSearchServer {
           ? `, fallback [${searchPlan.fallbackProviderNames.join(", ")}]`
           : "")
       );
+    }
+
+    const cacheNamespace = searchPlan
+      ? `auto:${searchPlan.profileVersion}:${searchPlan.intent}:${searchPlan.primaryProviderNames.join(",")}`
+      : strategy;
+    const cached = await this.cache.get(cacheKey, cacheNamespace);
+
+    if (cached !== null && cached.length > 0) {
+      console.error(`Semantic cache hit for query: ${query} [${cacheNamespace}]`);
+      if (deep) {
+        return this.buildSearchResponse(query, cached.slice(0, max_results));
+      }
+      const reranked = await this.cache.reRankResults(query, cached, max_results);
+      return {
+        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
+      };
+    }
+
+    let rawResults: SearchResultItem[];
+    if (searchPlan) {
       rawResults = await executeSearchPlan({
         providers: this.providers,
         query: providerQuery,
@@ -324,7 +329,11 @@ export class WebSearchServer {
         healthTracker: this.healthTracker,
       });
     } else {
-      rawResults = await this.executeProviderSearch(providerQuery, queryLocale, strategy);
+      rawResults = await this.executeProviderSearch(
+        providerQuery,
+        queryLocale,
+        strategy === "aggregate" ? "aggregate" : "fallback",
+      );
     }
 
     const results = filterSearchResultsByDomain(rawResults, normalizedDomain);
@@ -338,9 +347,7 @@ export class WebSearchServer {
       };
     }
 
-    if (useSemanticSearchCache) {
-      await this.cache.set(cacheKey, results);
-    }
+    await this.cache.set(cacheKey, results, cacheNamespace);
 
     if (!deep) {
       const reranked = await this.cache.reRankResults(query, results, max_results);
@@ -358,9 +365,14 @@ export class WebSearchServer {
     const validPages = pages.filter((page) => page !== null);
 
     if (validPages.length > 0) {
-      const combinedContent = validPages.map((page) => `# ${page.title}\n${page.content}`).join("\n\n---\n\n");
-      const sourceUrls = validPages.map((page) => page.url);
-      const answer = extractAnswerFromContent(query, combinedContent, sourceUrls);
+      const answer = extractAnswerFromDocuments(
+        query,
+        validPages.map((page) => ({
+          title: page.title,
+          url: page.url,
+          content: page.content,
+        })),
+      );
       return {
         content: [{ type: "text", text: answer }],
       };

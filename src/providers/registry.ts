@@ -5,6 +5,7 @@ import { searchBing } from "./bing.js";
 import { searchBrave } from "./brave.js";
 import { searchDDG } from "./duckduckgo.js";
 import { searchGoogle } from "./google.js";
+import { searchSearXng } from "./searxng.js";
 
 type ProviderExecutor = (query: string, locale: SearchLocale) => Promise<SearchResultItem[]>;
 
@@ -14,6 +15,7 @@ export function buildProviders(order: string[]): SearchProvider[] {
     bing: searchBing,
     brave: searchBrave,
     google: searchGoogle,
+    searxng: searchSearXng,
   };
 
   const providers: SearchProvider[] = [];
