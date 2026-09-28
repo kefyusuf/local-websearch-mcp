@@ -1,23 +1,40 @@
 # Local Web Search MCP Server
 
-Offline-first MCP server for web search and content fetching. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, and extractive deep-search answers.
+Offline-first MCP server for web search, content fetching, and a local knowledge base. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, hybrid retrieval, and extractive deep-search answers.
 
 ## Features
 
+**Search & fetch**
+
 - Browser context pooling with a persistent Playwright browser instance.
 - Web search through configurable providers with health tracking and ordered fallback. Supported scrapers: DuckDuckGo, Bing, Brave, Google. Optional SearXNG meta-search provider (self-hosted or trusted public instance) via `SEARXNG_BASE_URL`.
-- Optional federated search across all configured providers with URL normalization, cross-provider deduplication, and Reciprocal Rank Fusion (RRF).
-- Opt-in intent-aware search routing with conservative heuristics, local classifier fallback, and versioned provider profiles.
-- Domain-filtered web search for targeted site queries.
-- HTTP-first page fetching with GitHub Raw and RSS fast paths plus Playwright fallback for rendered pages.
-- SSRF protection for `fetch_content` by blocking localhost and private network targets.
-- Token-bucket rate limiting for search and fetch tools.
-- Semantic cache backed by SQLite and `sqlite-vec`.
-- Local knowledge base with hybrid retrieval: FTS5 keyword search + sqlite-vec semantic search fused with RRF.
-- `ingest_document`, `index_url`, and `search_index` tools for building a citable local corpus.
-- Optional cross-lingual query expansion with local Transformers.js models.
-- Clean Markdown extraction through Readability, JSDOM, and Turndown.
+- Federated search across providers with URL normalization, cross-provider deduplication, and Reciprocal Rank Fusion (RRF).
+- Opt-in intent-aware search routing (`strategy=auto`) with heuristics, local classifier fallback, and versioned provider profiles.
+- Domain filter (`domain`) and date-range filter (`from_date` / `to_date`).
+- Query rewrite and multi-query expansion (abbreviation expansion, question normalization, news year bias).
+- Optional cross-encoder reranking (`ENABLE_RERANKER`).
 - Deep-search answers with paragraph/sentence term scoring, stopword filtering, and per-source citations.
+- Structured JSON output (`format: "json"`) for machine-readable search results and answers.
+
+**Local knowledge base (RAG)**
+
+- Document chunking (paragraph-first with overlap).
+- Hybrid retrieval: FTS5 keyword search + `sqlite-vec` semantic search fused with RRF. Degrades to FTS-only when embeddings are unavailable.
+- `ingest_document`, `index_url`, `search_index`, and `list_index` tools for building a citable local corpus.
+- Entity graph over indexed documents with `find_related` (related docs + co-occurring entities).
+
+**Memory & observability**
+
+- Session memory (`remember` / `recall` / `forget`) with topic, tags, and session scoping.
+- Per-search execution traces (stages, timings, cache). Recent searches surface in `server_status`; `TRACE_SEARCHES=true` logs full traces.
+- Retrieval eval harness (`npm run eval:retrieval`) with recall@k, precision@k, and MRR.
+
+**Safety & infrastructure**
+
+- HTTP-first page fetching with GitHub Raw and RSS fast paths plus Playwright fallback.
+- SSRF protection for `fetch_content` and `index_url` by blocking localhost and private network targets.
+- Token-bucket rate limiting for search and fetch tools.
+- Semantic cache backed by SQLite and `sqlite-vec`, namespaced per execution strategy/plan.
 
 ## Requirements
 
@@ -32,7 +49,7 @@ npm install
 npm run build
 ```
 
-The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache. Keep `ENABLE_CROSSLINGUAL=false` for the lightest first run. Obvious `strategy=auto` intents are resolved by heuristics without loading the intent classifier; ambiguous auto queries may trigger a first-run classifier download.
+The `postinstall` script downloads Playwright Chromium. On first use of model-backed features, Transformers.js downloads the required model files to the local Hugging Face cache. The first request that loads a model can be slow; later requests reuse the local cache. Keep `ENABLE_CROSSLINGUAL=false` and `ENABLE_RERANKER=false` for the lightest first run. Obvious `strategy=auto` intents are resolved by heuristics without loading the intent classifier; ambiguous auto queries may trigger a first-run classifier download.
 
 ## MCP Client Configuration
 
@@ -79,13 +96,17 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 | Tool | Description |
 | --- | --- |
-| `web_search` | Searches the web and returns ranked results. Use `strategy=auto` for intent-aware provider planning, `strategy=aggregate` for all-provider federated search, `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
+| `web_search` | Searches the web and returns ranked results. Supports `strategy` (`fallback`/`aggregate`/`auto`), `domain`, `from_date`/`to_date`, `format` (`text`/`json`), and `deep=true` for source-backed answers. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with content caching, charset handling, GitHub Raw fast paths, RSS feed extraction, and Playwright fallback. |
-| `server_status` | Returns provider availability, cache stats, knowledge index stats, browser state, routing profile metadata, feature flags, and uptime. |
-| `ingest_document` | Chunks a document and indexes it into the local knowledge base (FTS + optional vectors) for later hybrid search. |
-| `index_url` | Fetches a URL and indexes its Markdown into the local knowledge base. |
-| `search_index` | Hybrid keyword + semantic search over the local knowledge base; returns chunks with source citations. |
+| `server_status` | Returns provider availability, cache stats, knowledge index stats, memory stats, entity graph stats, recent search traces, browser state, routing profile metadata, feature flags, and uptime. |
+| `ingest_document` | Chunks a document and indexes it into the local knowledge base (FTS + vectors) and entity graph. |
+| `index_url` | Fetches a URL and indexes its Markdown into the local knowledge base and entity graph. |
+| `search_index` | Hybrid keyword + semantic search over the local knowledge base; returns chunks with source citations. Supports `format: "json"`. |
 | `list_index` | Lists documents stored in the local knowledge base. |
+| `remember` | Stores a short fact or note in session memory. |
+| `recall` | Searches or lists session memory notes. |
+| `forget` | Deletes a session memory note by id. |
+| `find_related` | Explores the entity graph: related documents and co-occurring entities for an entity name. |
 
 ### Search strategies
 
@@ -116,7 +137,7 @@ Current routing profile: `v1`.
 
 These provider preferences are initial hypotheses, not permanent quality claims. They are versioned so later releases can tune them from deterministic and live evaluation evidence without scattering routing conditionals through the server.
 
-Example intent-aware search arguments:
+### Example: intent-aware search
 
 ```json
 {
@@ -137,11 +158,13 @@ Use `domain` for targeted searches such as `react.dev` or `github.com`. Intent d
 }
 ```
 
+Use `from_date` / `to_date` (inclusive `YYYY-MM-DD`) to filter by detected publish dates in titles and snippets. Results without a detectable date are kept by default.
+
 Use `deep=true` only when the client needs the server to fetch top pages and extract a likely answer from page text. Answers include per-source citations (`[Source N]`) mapped to the fetched URLs. The MCP client LLM remains responsible for final reasoning and summarization.
 
 Search snippets with old detected dates include a short freshness warning so clients can treat stale sources carefully.
 
-Example federated search arguments:
+### Example: federated search
 
 ```json
 {
@@ -149,6 +172,36 @@ Example federated search arguments:
   "strategy": "aggregate",
   "max_results": 5
 }
+```
+
+### Example: structured JSON output
+
+```json
+{
+  "query": "postgres pooling",
+  "format": "json",
+  "max_results": 5
+}
+```
+
+Returns a stable payload with `query`, `resultCount`, `results[]` (title, url, snippet, source, optional scores), and `meta`.
+
+### Example: local knowledge base
+
+```json
+{ "content": "PgBouncer multiplexes PostgreSQL connections...", "title": "PgBouncer Guide", "source": "https://example.com/pgbouncer" }
+```
+
+Then search it:
+
+```json
+{ "query": "connection pooler", "max_results": 5 }
+```
+
+Or explore the entity graph:
+
+```json
+{ "entity": "PgBouncer" }
 ```
 
 `fetch_content` uses fast source-specific paths before opening a browser:
@@ -163,14 +216,15 @@ Example federated search arguments:
 | --- | --- | --- |
 | `RATE_LIMIT_SEARCH_PER_MIN` | `10` | Maximum `web_search` requests per minute. Invalid or non-positive values disable the limiter. |
 | `RATE_LIMIT_FETCH_PER_MIN` | `20` | Maximum `fetch_content` requests per minute. Invalid or non-positive values disable the limiter. |
-| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`, `searxng`. `fallback` preserves this order; `aggregate` uses all configured providers; `auto` intersects profile preferences with this set. |
+| `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`, `searxng`. |
 | `SEARXNG_BASE_URL` | unset | Base URL of a SearXNG instance with the JSON format enabled (for example `https://searx.example.com`). Required for the `searxng` provider; no API key is used. |
 | `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. When disabled, query heuristics still infer supported locales such as Turkish. |
-| `ENABLE_RERANKER` | `false` | Enables optional cross-encoder reranking of web_search results using a local Transformers.js model. First use downloads the model. |
+| `ENABLE_RERANKER` | `false` | Enables optional cross-encoder reranking of `web_search` results using a local Transformers.js model. First use downloads the model. |
 | `TRACE_SEARCHES` | `false` | Logs a compact per-search execution trace (stages, timings, cache) to stderr. Recent searches are always exposed via `server_status`. |
+| `MEMORY_MAX_NOTES` | `500` | Maximum session-memory notes kept; oldest notes are evicted first. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
-| `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
+| `CACHE_DB_PATH` | `websearch_cache.db` | SQLite database path used by the semantic cache, content cache, knowledge index, session memory, and entity graph. |
 | `CACHE_CLEANUP_INTERVAL_HOURS` | `24` | Interval for expired content cache cleanup. |
 
 ## Docker
@@ -189,11 +243,14 @@ npm run build
 npm run typecheck
 npm test
 npm run smoke:mcp
+npm run eval:retrieval
 npm audit --audit-level=moderate
 npm pack --dry-run --json
 ```
 
-`npm run smoke:mcp` starts the compiled server over stdio, verifies the three `web_search` strategy values (`fallback`, `aggregate`, `auto`), checks routing diagnostics from `server_status`, and confirms that `fetch_content` blocks localhost. It does not perform a live provider search, keeping CI independent of search-engine HTML/network availability.
+`npm run smoke:mcp` starts the compiled server over stdio, verifies the `web_search` strategy values (`fallback`, `aggregate`, `auto`), checks the knowledge/memory tools, confirms routing diagnostics from `server_status`, and confirms that `fetch_content` blocks localhost. It does not perform a live provider search, keeping CI independent of search-engine HTML/network availability.
+
+`npm run eval:retrieval` runs offline retrieval metrics (recall@k, precision@k, MRR) over the knowledge index using fixtures in `evals/retrieval/cases.jsonl`.
 
 Deterministic TR/EN routing fixtures live in `evals/search-routing/queries.jsonl` and are exercised by the normal Vitest suite. They validate intent coverage, conservative heuristic behavior, ambiguity defer cases, and provider-allowlist enforcement without loading the real classifier or contacting providers.
 
@@ -206,6 +263,7 @@ Deterministic TR/EN routing fixtures live in `evals/search-routing/queries.jsonl
 - If `auto` chooses too broad a search plan for your use case, use explicit `fallback` or `aggregate`; explicit strategies bypass the auto planner.
 - If Docker cannot find Chromium, rebuild the image with `npm run docker:build`.
 - If cache files appear in the project root, set `CACHE_DB_PATH` to a dedicated data directory.
+- If knowledge search only hits keywords, embeddings may still be indexing; `search_index` falls back to FTS-only until vectors are ready.
 
 ## npm Packaging
 
