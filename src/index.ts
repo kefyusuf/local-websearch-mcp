@@ -34,6 +34,7 @@ import {
   type SearchLocale,
 } from "./search-utils.js";
 import { filterResultsByDate } from "./search/date-filter.js";
+import { CrossEncoderReranker, rerankResults } from "./search/rerank.js";
 import { ContentFetcher } from "./fetch-module.js";
 import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
 
@@ -109,6 +110,7 @@ export class WebSearchServer {
   private intentDetector: IntentDetector;
   private knowledgeIndex: KnowledgeIndex;
   private embeddingProvider: TransformersEmbeddingProvider;
+  private reranker: CrossEncoderReranker | null = null;
   private readonly startedAt = Date.now();
 
   constructor(intentDetector: IntentDetector = new SearchIntentDetector()) {
@@ -136,6 +138,11 @@ export class WebSearchServer {
     const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
     this.cache = new SemanticCache(embeddingProvider, vectorStore, 0.75, this.intentDetector);
     this.knowledgeIndex = new KnowledgeIndex(this.cacheDbPath);
+
+    if (getEnvBool("ENABLE_RERANKER", false)) {
+      this.reranker = new CrossEncoderReranker();
+      console.error("Cross-encoder reranker enabled (models download on first use).");
+    }
     const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
     const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
     setInterval(() => {
@@ -402,9 +409,11 @@ export class WebSearchServer {
       if (deep) {
         return this.buildSearchResponse(query, cached.slice(0, max_results));
       }
-      const reranked = await this.cache.reRankResults(query, cached, max_results);
+      const ranked = this.reranker
+        ? await rerankResults(query, cached, { scorer: this.reranker.asScorer(), limit: max_results })
+        : await this.cache.reRankResults(query, cached, max_results);
       return {
-        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
+        content: [{ type: "text", text: formatSearchResults(query, ranked.slice(0, max_results)) }],
       };
     }
 
@@ -443,9 +452,14 @@ export class WebSearchServer {
     await this.cache.set(cacheKey, results, cacheNamespace);
 
     if (!deep) {
-      const reranked = await this.cache.reRankResults(query, results, max_results);
+      const ranked = this.reranker
+        ? await rerankResults(query, results, {
+            scorer: this.reranker.asScorer(),
+            limit: max_results,
+          })
+        : await this.cache.reRankResults(query, results, max_results);
       return {
-        content: [{ type: "text", text: formatSearchResults(query, reranked.slice(0, max_results)) }],
+        content: [{ type: "text", text: formatSearchResults(query, ranked.slice(0, max_results)) }],
       };
     }
 
@@ -673,6 +687,7 @@ export class WebSearchServer {
         fetchWaitUntil: this.fetchWaitUntil,
         forcePlaywright: getEnvBool("FORCE_PLAYWRIGHT", false),
         cacheDbPath: this.cacheDbPath,
+        reranker: this.reranker ? "enabled" : "disabled",
       },
       uptime_seconds: Math.floor((Date.now() - this.startedAt) / 1000),
     };

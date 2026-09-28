@@ -166,6 +166,7 @@ Example federated search arguments:
 | `SEARCH_PROVIDERS` | `duckduckgo,bing` | Comma-separated provider allowlist/order. Supported values: `duckduckgo`, `bing`, `brave`, `google`, `searxng`. `fallback` preserves this order; `aggregate` uses all configured providers; `auto` intersects profile preferences with this set. |
 | `SEARXNG_BASE_URL` | unset | Base URL of a SearXNG instance with the JSON format enabled (for example `https://searx.example.com`). Required for the `searxng` provider; no API key is used. |
 | `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. When disabled, query heuristics still infer supported locales such as Turkish. |
+| `ENABLE_RERANKER` | `false` | Enables optional cross-encoder reranking of web_search results using a local Transformers.js model. First use downloads the model. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
 | `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |
