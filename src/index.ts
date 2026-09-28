@@ -39,6 +39,7 @@ import { ContentFetcher } from "./fetch-module.js";
 import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
 import { SessionMemory } from "./memory/session-memory.js";
 import { SearchTrace, formatTraceSummary } from "./observability/search-trace.js";
+import { rewriteQuery } from "./search/query-rewrite.js";
 
 // --- Types & Schemas ---
 
@@ -734,8 +735,9 @@ export class WebSearchServer {
 
   private async handleSearchIndex(args: unknown) {
     const { query, max_results = 5, source } = SearchIndexSchema.parse(args);
+    const effectiveQuery = rewriteQuery(query) || query;
 
-    const hits = await this.knowledgeIndex.search(query, max_results, {
+    const hits = await this.knowledgeIndex.search(effectiveQuery, max_results, {
       source,
       embed: (text) => this.embeddingProvider.getEmbedding(text),
     });
