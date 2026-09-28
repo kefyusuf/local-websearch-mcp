@@ -167,6 +167,7 @@ Example federated search arguments:
 | `SEARXNG_BASE_URL` | unset | Base URL of a SearXNG instance with the JSON format enabled (for example `https://searx.example.com`). Required for the `searxng` provider; no API key is used. |
 | `ENABLE_CROSSLINGUAL` | `false` | Enables language detection and cross-lingual search support. This can trigger first-run local model downloads. When disabled, query heuristics still infer supported locales such as Turkish. |
 | `ENABLE_RERANKER` | `false` | Enables optional cross-encoder reranking of web_search results using a local Transformers.js model. First use downloads the model. |
+| `TRACE_SEARCHES` | `false` | Logs a compact per-search execution trace (stages, timings, cache) to stderr. Recent searches are always exposed via `server_status`. |
 | `FETCH_WAIT_UNTIL` | `networkidle` | Playwright wait strategy. Use `domcontentloaded` for faster rendered-page fallback. |
 | `FORCE_PLAYWRIGHT` | unset | Set to `true` to skip HTTP-first fetch and always use Playwright. |
 | `CACHE_DB_PATH` | `websearch_cache.db` | SQLite cache database path. |

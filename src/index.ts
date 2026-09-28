@@ -38,6 +38,7 @@ import { CrossEncoderReranker, rerankResults } from "./search/rerank.js";
 import { ContentFetcher } from "./fetch-module.js";
 import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
 import { SessionMemory } from "./memory/session-memory.js";
+import { SearchTrace, formatTraceSummary } from "./observability/search-trace.js";
 
 // --- Types & Schemas ---
 
@@ -131,6 +132,8 @@ export class WebSearchServer {
   private embeddingProvider: TransformersEmbeddingProvider;
   private reranker: CrossEncoderReranker | null = null;
   private sessionMemory: SessionMemory;
+  private readonly recentTraces: Array<{ query: string; totalMs: number; cache?: string; strategy?: string; resultCount?: number }> = [];
+  private readonly maxTraceHistory = 20;
   private readonly startedAt = Date.now();
 
   constructor(intentDetector: IntentDetector = new SearchIntentDetector()) {
@@ -471,9 +474,26 @@ export class WebSearchServer {
     const cacheNamespace = searchPlan
       ? `auto:${searchPlan.profileVersion}:${searchPlan.intent}:${searchPlan.primaryProviderNames.join(",")}`
       : strategy;
+
+    const trace = new SearchTrace(query);
+    trace.setMeta({
+      strategy,
+      domain: normalizedDomain ?? "",
+      max_results,
+      deep,
+      cache_namespace: cacheNamespace,
+    });
+    if (searchPlan) {
+      trace.setMeta({ intent: searchPlan.intent, plan: searchPlan.strategy });
+    }
+
+    trace.startStage("cache.lookup");
     const cached = await this.cache.get(cacheKey, cacheNamespace);
 
     if (cached !== null && cached.length > 0) {
+      trace.endStage("cache.lookup", { status: "ok", resultCount: cached.length });
+      trace.setMeta({ cache: "hit" });
+      this.finalizeTrace(trace, cached.length);
       console.error(`Semantic cache hit for query: ${query} [${cacheNamespace}]`);
       if (deep) {
         return this.buildSearchResponse(query, cached.slice(0, max_results));
@@ -486,7 +506,11 @@ export class WebSearchServer {
       };
     }
 
+    trace.endStage("cache.lookup", { status: "empty", error: "miss" });
+    trace.setMeta({ cache: "miss" });
+
     let rawResults: SearchResultItem[];
+    trace.startStage("providers");
     if (searchPlan) {
       rawResults = await executeSearchPlan({
         providers: this.providers,
@@ -502,6 +526,10 @@ export class WebSearchServer {
         strategy === "aggregate" ? "aggregate" : "fallback",
       );
     }
+    trace.endStage("providers", {
+      status: rawResults.length > 0 ? "ok" : "empty",
+      resultCount: rawResults.length,
+    });
 
     const results = filterResultsByDate(
       filterSearchResultsByDomain(rawResults, normalizedDomain),
@@ -510,6 +538,8 @@ export class WebSearchServer {
     );
 
     if (results.length === 0) {
+      trace.endStage("filters", { status: "empty", resultCount: 0 });
+      this.finalizeTrace(trace, 0);
       return {
         content: [{ type: "text", text: normalizedDomain
           ? `No results matched the domain filter "${normalizedDomain}". Try a broader search or fetch_content with a direct URL.`
@@ -518,6 +548,7 @@ export class WebSearchServer {
       };
     }
 
+    trace.endStage("filters", { status: "ok", resultCount: results.length });
     await this.cache.set(cacheKey, results, cacheNamespace);
 
     if (!deep) {
@@ -527,12 +558,32 @@ export class WebSearchServer {
             limit: max_results,
           })
         : await this.cache.reRankResults(query, results, max_results);
+      this.finalizeTrace(trace, ranked.length);
       return {
         content: [{ type: "text", text: formatSearchResults(query, ranked.slice(0, max_results)) }],
       };
     }
 
+    this.finalizeTrace(trace, results.length);
     return this.buildSearchResponse(query, results.slice(0, max_results));
+  }
+
+  private finalizeTrace(trace: SearchTrace, resultCount: number): void {
+    const snapshot = trace.toJSON();
+    this.recentTraces.push({
+      query: snapshot.query,
+      totalMs: snapshot.totalMs,
+      cache: String(snapshot.meta.cache ?? ""),
+      strategy: String(snapshot.meta.strategy ?? ""),
+      resultCount,
+    });
+    if (this.recentTraces.length > this.maxTraceHistory) {
+      this.recentTraces.shift();
+    }
+
+    if (getEnvBool("TRACE_SEARCHES", false)) {
+      console.error(formatTraceSummary(trace));
+    }
   }
 
   private async buildSearchResponse(query: string, results: SearchResultItem[]) {
@@ -805,6 +856,7 @@ export class WebSearchServer {
       cache: cacheStats,
       knowledgeIndex: knowledgeStats,
       memory: memoryStats,
+      recentSearches: [...this.recentTraces].reverse().slice(0, 10),
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
       config: {
