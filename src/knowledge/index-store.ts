@@ -40,6 +40,8 @@ function makeId(parts: string[]): string {
 export class KnowledgeIndex {
   private db: Database.Database;
   private isVecEnabled = false;
+  private closed = false;
+  private pendingEmbeddings: Promise<void> = Promise.resolve();
 
   constructor(dbPath: string = "websearch_cache.db") {
     this.db = new Database(dbPath);
@@ -141,7 +143,8 @@ export class KnowledgeIndex {
     });
     run();
 
-    void this.embedChunks(docId, chunks.map((chunk) => ({ id: `${docId}:${chunk.index}`, text: chunk.text })));
+    const embedJob = this.embedChunks(docId, chunks.map((chunk) => ({ id: `${docId}:${chunk.index}`, text: chunk.text })));
+    this.pendingEmbeddings = this.pendingEmbeddings.then(() => embedJob).catch(() => undefined);
 
     return {
       id: docId,
@@ -155,23 +158,32 @@ export class KnowledgeIndex {
   }
 
   private async embedChunks(docId: string, chunks: { id: string; text: string }[]): Promise<void> {
-    if (!this.isVecEnabled || chunks.length === 0) return;
+    if (!this.isVecEnabled || chunks.length === 0 || this.closed) return;
 
     try {
       const { TransformersEmbeddingProvider } = await import("../cache/embedding.js");
       const provider = new TransformersEmbeddingProvider();
-      const insert = this.db.prepare("INSERT OR REPLACE INTO knowledge_chunks_vec(id, embedding) VALUES (?, ?)");
 
       for (const chunk of chunks) {
+        if (this.closed) return;
         const embedding = await provider.getEmbedding(chunk.text);
+        if (this.closed) return;
         if (embedding.length === EMBEDDING_DIM) {
-          insert.run(chunk.id, new Float32Array(embedding));
+          this.db.prepare("INSERT OR REPLACE INTO knowledge_chunks_vec(id, embedding) VALUES (?, ?)")
+            .run(chunk.id, new Float32Array(embedding));
         }
       }
       console.error(`KnowledgeIndex: embedded ${chunks.length} chunks for doc ${docId.slice(0, 8)}`);
     } catch (error) {
-      console.error("KnowledgeIndex: embedding failed, chunk remains FTS-only:", error);
+      if (!this.closed) {
+        console.error("KnowledgeIndex: embedding failed, chunk remains FTS-only:", error);
+      }
     }
+  }
+
+  /** Wait for background embedding jobs to settle (used by tests/tools). */
+  async flush(): Promise<void> {
+    await this.pendingEmbeddings;
   }
 
   async search(
@@ -342,6 +354,7 @@ export class KnowledgeIndex {
   }
 
   close(): void {
+    this.closed = true;
     this.db.close();
   }
 }
