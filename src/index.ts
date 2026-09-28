@@ -40,6 +40,13 @@ import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.
 import { SessionMemory } from "./memory/session-memory.js";
 import { SearchTrace, formatTraceSummary } from "./observability/search-trace.js";
 import { rewriteQuery } from "./search/query-rewrite.js";
+import {
+  buildAnswerJson,
+  buildIndexHitJson,
+  buildSearchJson,
+  formatToolResult,
+  type OutputFormat,
+} from "./format/structured-output.js";
 
 // --- Types & Schemas ---
 
@@ -50,6 +57,7 @@ export const SearchSchema = z.object({
   domain: z.string().min(1).optional().describe("Optional domain filter, for example react.dev or github.com."),
   from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Optional inclusive lower date bound (YYYY-MM-DD). Results without a detectable date are kept."),
   to_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Optional inclusive upper date bound (YYYY-MM-DD). Results without a detectable date are kept."),
+  format: z.enum(["text", "json"]).optional().describe("Response format. text (default) for readable Markdown-like output, json for machine-readable structured results."),
   strategy: z.enum(["fallback", "aggregate", "auto"]).optional().describe("Search execution strategy. fallback tries providers in order and stops at the first success. aggregate queries all available providers and fuses results with Reciprocal Rank Fusion. auto detects search intent and selects a configured-provider plan before using the existing fallback or aggregate execution path."),
 });
 
@@ -75,6 +83,7 @@ const SearchIndexSchema = z.object({
   query: z.string().min(1).describe("Hybrid search query over the local knowledge index."),
   max_results: z.number().int().min(1).max(20).optional().describe("Maximum chunks to return (1-20, default 5)."),
   source: z.string().optional().describe("Optional source filter, usually a URL or file path."),
+  format: z.enum(["text", "json"]).optional().describe("Response format: text (default) or json."),
 });
 
 const RememberSchema = z.object({
@@ -258,6 +267,7 @@ export class WebSearchServer {
               domain: { type: "string", description: "Optional domain filter, for example react.dev or github.com" },
               from_date: { type: "string", description: "Optional inclusive lower date bound YYYY-MM-DD" },
               to_date: { type: "string", description: "Optional inclusive upper date bound YYYY-MM-DD" },
+              format: { type: "string", enum: ["text", "json"], description: "Response format (default: text)" },
               strategy: {
                 type: "string",
                 enum: ["fallback", "aggregate", "auto"],
@@ -324,6 +334,7 @@ export class WebSearchServer {
               query: { type: "string", description: "Search query" },
               max_results: { type: "number", description: "Maximum chunks to return, 1-20 (default 5)" },
               source: { type: "string", description: "Optional source filter (URL or path)" },
+              format: { type: "string", enum: ["text", "json"], description: "Response format (default: text)" },
             },
             required: ["query"],
           },
@@ -445,7 +456,8 @@ export class WebSearchServer {
       };
     }
 
-    const { query, deep = false, max_results = 5, domain, from_date, to_date, strategy = "fallback" } = SearchSchema.parse(args);
+    const { query, deep = false, max_results = 5, domain, from_date, to_date, format = "text", strategy = "fallback" } = SearchSchema.parse(args);
+    const outputFormat: OutputFormat = format;
     const normalizedDomain = normalizeDomainFilter(domain);
     const providerQuery = normalizedDomain ? `${query} site:${normalizedDomain}` : query;
     const cacheKey = normalizedDomain ? `${query} domain:${normalizedDomain}` : query;
@@ -497,13 +509,19 @@ export class WebSearchServer {
       this.finalizeTrace(trace, cached.length);
       console.error(`Semantic cache hit for query: ${query} [${cacheNamespace}]`);
       if (deep) {
-        return this.buildSearchResponse(query, cached.slice(0, max_results));
+        return this.buildSearchResponse(query, cached.slice(0, max_results), outputFormat);
       }
       const ranked = this.reranker
         ? await rerankResults(query, cached, { scorer: this.reranker.asScorer(), limit: max_results })
         : await this.cache.reRankResults(query, cached, max_results);
+      const limited = ranked.slice(0, max_results);
       return {
-        content: [{ type: "text", text: formatSearchResults(query, ranked.slice(0, max_results)) }],
+        content: [{
+          type: "text",
+          text: outputFormat === "json"
+            ? formatToolResult(buildSearchJson(query, limited, { strategy, cache: "hit" }), "json")
+            : formatSearchResults(query, limited),
+        }],
       };
     }
 
@@ -560,13 +578,19 @@ export class WebSearchServer {
           })
         : await this.cache.reRankResults(query, results, max_results);
       this.finalizeTrace(trace, ranked.length);
+      const limited = ranked.slice(0, max_results);
       return {
-        content: [{ type: "text", text: formatSearchResults(query, ranked.slice(0, max_results)) }],
+        content: [{
+          type: "text",
+          text: outputFormat === "json"
+            ? formatToolResult(buildSearchJson(query, limited, { strategy, cache: "miss", resultCount: limited.length }), "json")
+            : formatSearchResults(query, limited),
+        }],
       };
     }
 
     this.finalizeTrace(trace, results.length);
-    return this.buildSearchResponse(query, results.slice(0, max_results));
+    return this.buildSearchResponse(query, results.slice(0, max_results), outputFormat);
   }
 
   private finalizeTrace(trace: SearchTrace, resultCount: number): void {
@@ -587,7 +611,7 @@ export class WebSearchServer {
     }
   }
 
-  private async buildSearchResponse(query: string, results: SearchResultItem[]) {
+  private async buildSearchResponse(query: string, results: SearchResultItem[], format: OutputFormat = "text") {
     const urls = results.slice(0, 2).map((result) => result.url).filter(Boolean);
     const pages = await Promise.all(urls.map((url) => this.contentFetcher.fetchPage(url)));
     const validPages = pages.filter((page) => page !== null);
@@ -601,6 +625,23 @@ export class WebSearchServer {
           content: page.content,
         })),
       );
+
+      if (format === "json") {
+        return {
+          content: [{
+            type: "text",
+            text: formatToolResult(
+              buildAnswerJson(
+                query,
+                answer,
+                validPages.map((page) => ({ url: page.url, title: page.title })),
+              ),
+              "json",
+            ),
+          }],
+        };
+      }
+
       return {
         content: [{ type: "text", text: answer }],
       };
@@ -608,7 +649,12 @@ export class WebSearchServer {
 
     const rankedResults = await this.cache.reRankResults(query, results, results.length);
     return {
-      content: [{ type: "text", text: formatSearchResults(query, rankedResults) }],
+      content: [{
+        type: "text",
+        text: format === "json"
+          ? formatToolResult(buildSearchJson(query, rankedResults, { deep: true, pagesFetched: 0 }), "json")
+          : formatSearchResults(query, rankedResults),
+      }],
     };
   }
 
@@ -734,13 +780,22 @@ export class WebSearchServer {
   }
 
   private async handleSearchIndex(args: unknown) {
-    const { query, max_results = 5, source } = SearchIndexSchema.parse(args);
+    const { query, max_results = 5, source, format = "text" } = SearchIndexSchema.parse(args);
     const effectiveQuery = rewriteQuery(query) || query;
 
     const hits = await this.knowledgeIndex.search(effectiveQuery, max_results, {
       source,
       embed: (text) => this.embeddingProvider.getEmbedding(text),
     });
+
+    if (format === "json") {
+      return {
+        content: [{
+          type: "text",
+          text: formatToolResult(buildIndexHitJson(query, hits), "json"),
+        }],
+      };
+    }
 
     if (hits.length === 0) {
       return {
