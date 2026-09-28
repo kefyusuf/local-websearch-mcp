@@ -34,6 +34,7 @@ import {
   type SearchLocale,
 } from "./search-utils.js";
 import { ContentFetcher } from "./fetch-module.js";
+import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
 
 // --- Types & Schemas ---
 
@@ -48,6 +49,25 @@ export const SearchSchema = z.object({
 const FetchSchema = z.object({
   url: z.string().url().describe("The URL of the webpage to fetch and convert to markdown"),
   force_refresh: z.boolean().optional().describe("If true, bypass cache and fetch fresh content from the web"),
+});
+
+const IngestDocumentSchema = z.object({
+  content: z.string().min(1).describe("Document text to index (Markdown or plain text)."),
+  title: z.string().optional().describe("Optional document title."),
+  source: z.string().optional().describe("Optional source identifier, usually a URL or file path."),
+  category: z.string().optional().describe("Optional category label, e.g. docs, notes, research."),
+});
+
+const IndexUrlSchema = z.object({
+  url: z.string().url().describe("URL to fetch and index into the local knowledge base."),
+  title: z.string().optional().describe("Optional title override for the indexed document."),
+  force_refresh: z.boolean().optional().describe("If true, bypass content cache when fetching."),
+});
+
+const SearchIndexSchema = z.object({
+  query: z.string().min(1).describe("Hybrid search query over the local knowledge index."),
+  max_results: z.number().int().min(1).max(20).optional().describe("Maximum chunks to return (1-20, default 5)."),
+  source: z.string().optional().describe("Optional source filter, usually a URL or file path."),
 });
 
 // --- Env Configuration ---
@@ -84,6 +104,8 @@ export class WebSearchServer {
   private cacheDbPath: string;
   private contentFetcher: ContentFetcher;
   private intentDetector: IntentDetector;
+  private knowledgeIndex: KnowledgeIndex;
+  private embeddingProvider: TransformersEmbeddingProvider;
   private readonly startedAt = Date.now();
 
   constructor(intentDetector: IntentDetector = new SearchIntentDetector()) {
@@ -107,8 +129,10 @@ export class WebSearchServer {
     // Initialize Semantic Cache with SQLite for persistence. The router and content
     // cache share one detector so ambiguous requests do not create duplicate models.
     const embeddingProvider = new TransformersEmbeddingProvider();
+    this.embeddingProvider = embeddingProvider;
     const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
     this.cache = new SemanticCache(embeddingProvider, vectorStore, 0.75, this.intentDetector);
+    this.knowledgeIndex = new KnowledgeIndex(this.cacheDbPath);
     const cleanupIntervalHours = parseInt(getEnv("CACHE_CLEANUP_INTERVAL_HOURS", "24"), 10);
     const cleanupIntervalMs = (isNaN(cleanupIntervalHours) || cleanupIntervalHours <= 0 ? 24 : cleanupIntervalHours) * 60 * 60 * 1000;
     setInterval(() => {
@@ -173,6 +197,7 @@ export class WebSearchServer {
       }
       this.contentFetcher.close();
       this.cache.close();
+      this.knowledgeIndex.close();
     };
 
     process.on("SIGINT", shutdown);
@@ -223,6 +248,57 @@ export class WebSearchServer {
             required: [],
           },
         },
+        {
+          name: "ingest_document",
+          description: "Index a document into the local knowledge base for later hybrid search (FTS + vectors). Use this to remember reference material the agent will cite later.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              content: { type: "string", description: "Document text (Markdown or plain text)" },
+              title: { type: "string", description: "Optional title" },
+              source: { type: "string", description: "Optional source URL or path" },
+              category: { type: "string", description: "Optional category label" },
+            },
+            required: ["content"],
+          },
+        },
+        {
+          name: "index_url",
+          description: "Fetch a URL and index its clean Markdown into the local knowledge base for later hybrid search.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              url: { type: "string", description: "URL to fetch and index" },
+              title: { type: "string", description: "Optional title override" },
+              force_refresh: { type: "boolean", description: "Bypass content cache when fetching" },
+            },
+            required: ["url"],
+          },
+        },
+        {
+          name: "search_index",
+          description: "Hybrid search (keyword + semantic) over the local knowledge base. Returns matching chunks with source citations.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query" },
+              max_results: { type: "number", description: "Maximum chunks to return, 1-20 (default 5)" },
+              source: { type: "string", description: "Optional source filter (URL or path)" },
+            },
+            required: ["query"],
+          },
+        },
+        {
+          name: "list_index",
+          description: "List documents currently stored in the local knowledge base.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              limit: { type: "number", description: "Maximum documents to return (default 50)" },
+            },
+            required: [],
+          },
+        },
       ],
     }));
 
@@ -236,6 +312,14 @@ export class WebSearchServer {
           return await this.handleFetch(args);
         } else if (name === "server_status") {
           return await this.handleStatus();
+        } else if (name === "ingest_document") {
+          return await this.handleIngestDocument(args);
+        } else if (name === "index_url") {
+          return await this.handleIndexUrl(args);
+        } else if (name === "search_index") {
+          return await this.handleSearchIndex(args);
+        } else if (name === "list_index") {
+          return await this.handleListIndex(args);
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -439,14 +523,137 @@ export class WebSearchServer {
     };
   }
 
+  private async handleIngestDocument(args: unknown) {
+    try {
+      const { content, title, source, category } = IngestDocumentSchema.parse(args);
+      const doc = this.knowledgeIndex.ingest({ content, title, source, category });
+      return {
+        content: [{
+          type: "text",
+          text: `Indexed document "${doc.title}" (${doc.id.slice(0, 12)}…)\nSource: ${doc.source}\nChunks: ${doc.chunkCount}\nCategory: ${doc.category}`,
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to ingest document: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleIndexUrl(args: unknown) {
+    const { allowed, retryAfterMs } = this.fetchLimiter.tryConsume();
+    if (!allowed) {
+      const seconds = Math.ceil(retryAfterMs / 1000);
+      return {
+        content: [{ type: "text", text: `Rate limit exceeded: index_url allows ${process.env.RATE_LIMIT_FETCH_PER_MIN || "20"} requests per minute. Retry in ${seconds} seconds.` }],
+        isError: true,
+      };
+    }
+
+    const { url, title, force_refresh } = IndexUrlSchema.parse(args);
+    const validation = await validatePublicHttpUrl(url);
+    if (!validation.ok) {
+      return {
+        content: [{ type: "text", text: `Access to unsupported or local/private resource is blocked for security reasons: ${validation.hostname ?? url}` }],
+        isError: true,
+      };
+    }
+
+    const result = await this.contentFetcher.fetchContent(url, force_refresh ?? false);
+    if (result.kind === "error") {
+      return {
+        content: [{ type: "text", text: `Could not fetch page for indexing: ${result.reason}` }],
+        isError: true,
+      };
+    }
+
+    try {
+      const doc = this.knowledgeIndex.ingest({
+        content: result.text,
+        title: title || url,
+        source: url,
+        category: "web",
+      });
+      return {
+        content: [{
+          type: "text",
+          text: `Indexed ${url}\nTitle: ${doc.title}\nChunks: ${doc.chunkCount}\nDoc ID: ${doc.id.slice(0, 12)}…`,
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to index page: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleSearchIndex(args: unknown) {
+    const { query, max_results = 5, source } = SearchIndexSchema.parse(args);
+
+    const hits = await this.knowledgeIndex.search(query, max_results, {
+      source,
+      embed: (text) => this.embeddingProvider.getEmbedding(text),
+    });
+
+    if (hits.length === 0) {
+      return {
+        content: [{ type: "text", text: `No knowledge-index chunks matched "${query}". Use ingest_document or index_url to add content first.` }],
+      };
+    }
+
+    const lines = hits.map((hit: KnowledgeChunkHit, index: number) => {
+      const excerpt = hit.text.length > 400 ? `${hit.text.slice(0, 400)}…` : hit.text;
+      return `${index + 1}. [Source ${index + 1}] "${hit.title}" (${hit.source})\n   match=${hit.matchedBy} score=${hit.score.toFixed(4)} chunk=${hit.chunkIndex}\n   ${excerpt}`;
+    });
+
+    const sources = hits.map((hit: KnowledgeChunkHit, index: number) => `Source ${index + 1}: ${hit.source} — ${hit.title}`).join("\n");
+
+    return {
+      content: [{
+        type: "text",
+        text: `Knowledge index hits for "${query}":\n\n${lines.join("\n\n")}\n\nSources:\n${sources}`,
+      }],
+    };
+  }
+
+  private async handleListIndex(args: unknown) {
+    const limit = typeof args === "object" && args !== null && "limit" in args
+      ? Number((args as { limit?: unknown }).limit) || 50
+      : 50;
+
+    const docs = this.knowledgeIndex.listDocs(limit);
+    const stats = this.knowledgeIndex.getStats();
+
+    if (docs.length === 0) {
+      return {
+        content: [{ type: "text", text: "Knowledge index is empty. Use ingest_document or index_url to add content." }],
+      };
+    }
+
+    const lines = docs.map((doc, index) =>
+      `${index + 1}. ${doc.title} (${doc.source}) — ${doc.chunkCount} chunks, ${doc.category}, id=${doc.id.slice(0, 12)}…`
+    );
+
+    return {
+      content: [{
+        type: "text",
+        text: `Knowledge index: ${stats.docCount} docs, ${stats.chunkCount} chunks, ${stats.vectorCount} vectors\n\n${lines.join("\n")}`,
+      }],
+    };
+  }
+
   private async handleStatus() {
     const cacheStats = this.cache.getCacheStats();
+    const knowledgeStats = this.knowledgeIndex.getStats();
     const status = {
       providers: this.providers.map((provider) => ({
         name: provider.name,
         ...this.healthTracker.getSnapshot(provider.name),
       })),
       cache: cacheStats,
+      knowledgeIndex: knowledgeStats,
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
       config: {

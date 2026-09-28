@@ -13,6 +13,8 @@ Offline-first MCP server for web search and content fetching. It requires no ext
 - SSRF protection for `fetch_content` by blocking localhost and private network targets.
 - Token-bucket rate limiting for search and fetch tools.
 - Semantic cache backed by SQLite and `sqlite-vec`.
+- Local knowledge base with hybrid retrieval: FTS5 keyword search + sqlite-vec semantic search fused with RRF.
+- `ingest_document`, `index_url`, and `search_index` tools for building a citable local corpus.
 - Optional cross-lingual query expansion with local Transformers.js models.
 - Clean Markdown extraction through Readability, JSDOM, and Turndown.
 - Deep-search answers with paragraph/sentence term scoring, stopword filtering, and per-source citations.
@@ -79,7 +81,11 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 | --- | --- |
 | `web_search` | Searches the web and returns ranked results. Use `strategy=auto` for intent-aware provider planning, `strategy=aggregate` for all-provider federated search, `domain` to restrict results to a site, or `deep=true` to fetch top result pages and extract a source-backed text answer. |
 | `fetch_content` | Fetches a URL and returns clean Markdown with content caching, charset handling, GitHub Raw fast paths, RSS feed extraction, and Playwright fallback. |
-| `server_status` | Returns provider availability, cache stats, browser state, routing profile metadata, feature flags, and uptime. |
+| `server_status` | Returns provider availability, cache stats, knowledge index stats, browser state, routing profile metadata, feature flags, and uptime. |
+| `ingest_document` | Chunks a document and indexes it into the local knowledge base (FTS + optional vectors) for later hybrid search. |
+| `index_url` | Fetches a URL and indexes its Markdown into the local knowledge base. |
+| `search_index` | Hybrid keyword + semantic search over the local knowledge base; returns chunks with source citations. |
+| `list_index` | Lists documents stored in the local knowledge base. |
 
 ### Search strategies
 
