@@ -33,6 +33,7 @@ import {
   resolveSearchLocale,
   type SearchLocale,
 } from "./search-utils.js";
+import { filterResultsByDate } from "./search/date-filter.js";
 import { ContentFetcher } from "./fetch-module.js";
 import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
 
@@ -43,6 +44,8 @@ export const SearchSchema = z.object({
   deep: z.boolean().optional().describe("If true, fetch the top result pages and extract a direct answer. If false (default), return a ranked list of results quickly without page fetching."),
   max_results: z.number().int().min(1).max(10).optional().describe("Maximum number of results to return (1-10, default 5)."),
   domain: z.string().min(1).optional().describe("Optional domain filter, for example react.dev or github.com."),
+  from_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Optional inclusive lower date bound (YYYY-MM-DD). Results without a detectable date are kept."),
+  to_date: z.string().regex(/^\d{4}-\d{2}-\d{2}$/).optional().describe("Optional inclusive upper date bound (YYYY-MM-DD). Results without a detectable date are kept."),
   strategy: z.enum(["fallback", "aggregate", "auto"]).optional().describe("Search execution strategy. fallback tries providers in order and stops at the first success. aggregate queries all available providers and fuses results with Reciprocal Rank Fusion. auto detects search intent and selects a configured-provider plan before using the existing fallback or aggregate execution path."),
 });
 
@@ -218,6 +221,8 @@ export class WebSearchServer {
               deep: { type: "boolean", description: "Fetch pages and extract answer (default: false)" },
               max_results: { type: "number", description: "Number of results to return, 1-10 (default: 5)" },
               domain: { type: "string", description: "Optional domain filter, for example react.dev or github.com" },
+              from_date: { type: "string", description: "Optional inclusive lower date bound YYYY-MM-DD" },
+              to_date: { type: "string", description: "Optional inclusive upper date bound YYYY-MM-DD" },
               strategy: {
                 type: "string",
                 enum: ["fallback", "aggregate", "auto"],
@@ -360,7 +365,7 @@ export class WebSearchServer {
       };
     }
 
-    const { query, deep = false, max_results = 5, domain, strategy = "fallback" } = SearchSchema.parse(args);
+    const { query, deep = false, max_results = 5, domain, from_date, to_date, strategy = "fallback" } = SearchSchema.parse(args);
     const normalizedDomain = normalizeDomainFilter(domain);
     const providerQuery = normalizedDomain ? `${query} site:${normalizedDomain}` : query;
     const cacheKey = normalizedDomain ? `${query} domain:${normalizedDomain}` : query;
@@ -420,7 +425,11 @@ export class WebSearchServer {
       );
     }
 
-    const results = filterSearchResultsByDomain(rawResults, normalizedDomain);
+    const results = filterResultsByDate(
+      filterSearchResultsByDomain(rawResults, normalizedDomain),
+      from_date || to_date ? { from: from_date, to: to_date } : undefined,
+      { keepUndated: true },
+    );
 
     if (results.length === 0) {
       return {
