@@ -37,6 +37,7 @@ import { filterResultsByDate } from "./search/date-filter.js";
 import { CrossEncoderReranker, rerankResults } from "./search/rerank.js";
 import { ContentFetcher } from "./fetch-module.js";
 import { KnowledgeIndex, type KnowledgeChunkHit } from "./knowledge/index-store.js";
+import { SessionMemory } from "./memory/session-memory.js";
 
 // --- Types & Schemas ---
 
@@ -72,6 +73,24 @@ const SearchIndexSchema = z.object({
   query: z.string().min(1).describe("Hybrid search query over the local knowledge index."),
   max_results: z.number().int().min(1).max(20).optional().describe("Maximum chunks to return (1-20, default 5)."),
   source: z.string().optional().describe("Optional source filter, usually a URL or file path."),
+});
+
+const RememberSchema = z.object({
+  text: z.string().min(1).describe("Short fact or note to remember for later turns."),
+  topic: z.string().optional().describe("Optional topic label for grouping."),
+  tags: z.array(z.string()).optional().describe("Optional tags for search."),
+  session: z.string().optional().describe("Optional session id to scope the note."),
+});
+
+const RecallSchema = z.object({
+  query: z.string().optional().describe("Optional search text. Omit to list recent notes."),
+  topic: z.string().optional().describe("Optional topic filter."),
+  session: z.string().optional().describe("Optional session filter."),
+  limit: z.number().int().min(1).max(50).optional().describe("Maximum notes to return (default 10)."),
+});
+
+const ForgetSchema = z.object({
+  id: z.string().min(1).describe("Note id to delete."),
 });
 
 // --- Env Configuration ---
@@ -111,6 +130,7 @@ export class WebSearchServer {
   private knowledgeIndex: KnowledgeIndex;
   private embeddingProvider: TransformersEmbeddingProvider;
   private reranker: CrossEncoderReranker | null = null;
+  private sessionMemory: SessionMemory;
   private readonly startedAt = Date.now();
 
   constructor(intentDetector: IntentDetector = new SearchIntentDetector()) {
@@ -138,6 +158,9 @@ export class WebSearchServer {
     const vectorStore = new SQLiteVectorStore(this.cacheDbPath);
     this.cache = new SemanticCache(embeddingProvider, vectorStore, 0.75, this.intentDetector);
     this.knowledgeIndex = new KnowledgeIndex(this.cacheDbPath);
+    this.sessionMemory = new SessionMemory(this.cacheDbPath, {
+      maxNotes: parseInt(getEnv("MEMORY_MAX_NOTES", "500"), 10) || 500,
+    });
 
     if (getEnvBool("ENABLE_RERANKER", false)) {
       this.reranker = new CrossEncoderReranker();
@@ -208,6 +231,7 @@ export class WebSearchServer {
       this.contentFetcher.close();
       this.cache.close();
       this.knowledgeIndex.close();
+      this.sessionMemory.close();
     };
 
     process.on("SIGINT", shutdown);
@@ -311,6 +335,45 @@ export class WebSearchServer {
             required: [],
           },
         },
+        {
+          name: "remember",
+          description: "Store a short fact or note in session memory for later turns. Keep notes concise and specific.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              text: { type: "string", description: "Fact or note to remember" },
+              topic: { type: "string", description: "Optional topic label" },
+              tags: { type: "array", items: { type: "string" }, description: "Optional tags" },
+              session: { type: "string", description: "Optional session id" },
+            },
+            required: ["text"],
+          },
+        },
+        {
+          name: "recall",
+          description: "Recall notes from session memory. Pass a query to search, or omit it to list recent notes.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Optional search text" },
+              topic: { type: "string", description: "Optional topic filter" },
+              session: { type: "string", description: "Optional session filter" },
+              limit: { type: "number", description: "Maximum notes to return, 1-50 (default 10)" },
+            },
+            required: [],
+          },
+        },
+        {
+          name: "forget",
+          description: "Delete a note from session memory by id.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              id: { type: "string", description: "Note id returned by remember" },
+            },
+            required: ["id"],
+          },
+        },
       ],
     }));
 
@@ -332,6 +395,12 @@ export class WebSearchServer {
           return await this.handleSearchIndex(args);
         } else if (name === "list_index") {
           return await this.handleListIndex(args);
+        } else if (name === "remember") {
+          return await this.handleRemember(args);
+        } else if (name === "recall") {
+          return await this.handleRecall(args);
+        } else if (name === "forget") {
+          return await this.handleForget(args);
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -667,9 +736,67 @@ export class WebSearchServer {
     };
   }
 
+  private async handleRemember(args: unknown) {
+    try {
+      const { text, topic, tags, session } = RememberSchema.parse(args);
+      const note = this.sessionMemory.remember(text, { topic, tags, session });
+      return {
+        content: [{
+          type: "text",
+          text: `Remembered (id=${note.id.slice(0, 12)}…, topic=${note.topic}, session=${note.session}): ${note.text}`,
+        }],
+      };
+    } catch (error) {
+      return {
+        content: [{ type: "text", text: `Failed to remember: ${error instanceof Error ? error.message : String(error)}` }],
+        isError: true,
+      };
+    }
+  }
+
+  private async handleRecall(args: unknown) {
+    const { query, topic, session, limit = 10 } = RecallSchema.parse(args ?? {});
+    const filter = { topic, session, limit };
+
+    const notes = query && query.trim()
+      ? this.sessionMemory.search(query, filter)
+      : this.sessionMemory.list(filter);
+
+    const stats = this.sessionMemory.getStats();
+    if (notes.length === 0) {
+      return {
+        content: [{ type: "text", text: `No memory notes matched. (${stats.count} notes stored across ${stats.sessions} sessions)` }],
+      };
+    }
+
+    const lines = notes.map((note, index) =>
+      `${index + 1}. [${note.id.slice(0, 12)}…] (${note.topic}${note.tags.length ? `, ${note.tags.join(",")}` : ""}) ${note.text}`
+    );
+
+    return {
+      content: [{
+        type: "text",
+        text: `Session memory (${stats.count} notes total):\n\n${lines.join("\n")}`,
+      }],
+    };
+  }
+
+  private async handleForget(args: unknown) {
+    const { id } = ForgetSchema.parse(args);
+    const deleted = this.sessionMemory.delete(id);
+    return {
+      content: [{
+        type: "text",
+        text: deleted ? `Deleted note ${id}` : `No note found with id ${id}`,
+      }],
+      isError: deleted ? undefined : true,
+    };
+  }
+
   private async handleStatus() {
     const cacheStats = this.cache.getCacheStats();
     const knowledgeStats = this.knowledgeIndex.getStats();
+    const memoryStats = this.sessionMemory.getStats();
     const status = {
       providers: this.providers.map((provider) => ({
         name: provider.name,
@@ -677,6 +804,7 @@ export class WebSearchServer {
       })),
       cache: cacheStats,
       knowledgeIndex: knowledgeStats,
+      memory: memoryStats,
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
       config: {
