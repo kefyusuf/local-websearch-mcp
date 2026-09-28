@@ -47,6 +47,7 @@ import {
   formatToolResult,
   type OutputFormat,
 } from "./format/structured-output.js";
+import { EntityGraph } from "./graph/entity-graph.js";
 
 // --- Types & Schemas ---
 
@@ -142,6 +143,7 @@ export class WebSearchServer {
   private embeddingProvider: TransformersEmbeddingProvider;
   private reranker: CrossEncoderReranker | null = null;
   private sessionMemory: SessionMemory;
+  private entityGraph: EntityGraph;
   private readonly recentTraces: Array<{ query: string; totalMs: number; cache?: string; strategy?: string; resultCount?: number }> = [];
   private readonly maxTraceHistory = 20;
   private readonly startedAt = Date.now();
@@ -174,6 +176,7 @@ export class WebSearchServer {
     this.sessionMemory = new SessionMemory(this.cacheDbPath, {
       maxNotes: parseInt(getEnv("MEMORY_MAX_NOTES", "500"), 10) || 500,
     });
+    this.entityGraph = new EntityGraph(this.cacheDbPath);
 
     if (getEnvBool("ENABLE_RERANKER", false)) {
       this.reranker = new CrossEncoderReranker();
@@ -245,6 +248,7 @@ export class WebSearchServer {
       this.cache.close();
       this.knowledgeIndex.close();
       this.sessionMemory.close();
+      this.entityGraph.close();
     };
 
     process.on("SIGINT", shutdown);
@@ -389,6 +393,18 @@ export class WebSearchServer {
             required: ["id"],
           },
         },
+        {
+          name: "find_related",
+          description: "Explore the entity graph built from indexed documents. Returns documents and co-occurring entities for a given entity name.",
+          inputSchema: {
+            type: "object",
+            properties: {
+              entity: { type: "string", description: "Entity name, e.g. Kubernetes" },
+              limit: { type: "number", description: "Maximum related items, 1-20 (default 10)" },
+            },
+            required: ["entity"],
+          },
+        },
       ],
     }));
 
@@ -416,6 +432,8 @@ export class WebSearchServer {
           return await this.handleRecall(args);
         } else if (name === "forget") {
           return await this.handleForget(args);
+        } else if (name === "find_related") {
+          return await this.handleFindRelated(args);
         } else {
           return {
             content: [{ type: "text", text: `Unknown tool: ${name}` }],
@@ -717,10 +735,16 @@ export class WebSearchServer {
     try {
       const { content, title, source, category } = IngestDocumentSchema.parse(args);
       const doc = this.knowledgeIndex.ingest({ content, title, source, category });
+      const entityCount = this.entityGraph.indexDocument({
+        docId: doc.id,
+        source: doc.source,
+        title: doc.title,
+        content: doc.content,
+      });
       return {
         content: [{
           type: "text",
-          text: `Indexed document "${doc.title}" (${doc.id.slice(0, 12)}…)\nSource: ${doc.source}\nChunks: ${doc.chunkCount}\nCategory: ${doc.category}`,
+          text: `Indexed document "${doc.title}" (${doc.id.slice(0, 12)}…)\nSource: ${doc.source}\nChunks: ${doc.chunkCount}\nEntities: ${entityCount}\nCategory: ${doc.category}`,
         }],
       };
     } catch (error) {
@@ -765,10 +789,16 @@ export class WebSearchServer {
         source: url,
         category: "web",
       });
+      const entityCount = this.entityGraph.indexDocument({
+        docId: doc.id,
+        source: doc.source,
+        title: doc.title,
+        content: doc.content,
+      });
       return {
         content: [{
           type: "text",
-          text: `Indexed ${url}\nTitle: ${doc.title}\nChunks: ${doc.chunkCount}\nDoc ID: ${doc.id.slice(0, 12)}…`,
+          text: `Indexed ${url}\nTitle: ${doc.title}\nChunks: ${doc.chunkCount}\nEntities: ${entityCount}\nDoc ID: ${doc.id.slice(0, 12)}…`,
         }],
       };
     } catch (error) {
@@ -777,6 +807,41 @@ export class WebSearchServer {
         isError: true,
       };
     }
+  }
+
+  private async handleFindRelated(args: unknown) {
+    const schema = z.object({
+      entity: z.string().min(1).describe("Entity name, e.g. Kubernetes or PgBouncer"),
+      limit: z.number().int().min(1).max(20).optional().describe("Maximum related items (default 10)"),
+    });
+    const { entity, limit = 10 } = schema.parse(args);
+
+    const docs = this.entityGraph.docsForEntity(entity, limit);
+    const neighbors = this.entityGraph.relatedEntities(entity, limit);
+
+    if (docs.length === 0 && neighbors.length === 0) {
+      return {
+        content: [{ type: "text", text: `No graph links found for entity "${entity}". Ingest documents first with ingest_document or index_url.` }],
+      };
+    }
+
+    const lines: string[] = [`Entity graph for "${entity}":`];
+    if (docs.length > 0) {
+      lines.push("", "Documents:");
+      docs.forEach((doc, index) => {
+        lines.push(`  ${index + 1}. ${doc.title} (${doc.source}) — mentions=${doc.count}`);
+      });
+    }
+    if (neighbors.length > 0) {
+      lines.push("", "Related entities:");
+      neighbors.forEach((neighbor, index) => {
+        lines.push(`  ${index + 1}. ${neighbor.name} — cooccurrence=${neighbor.cooccurrence}`);
+      });
+    }
+
+    return {
+      content: [{ type: "text", text: lines.join("\n") }],
+    };
   }
 
   private async handleSearchIndex(args: unknown) {
@@ -913,6 +978,7 @@ export class WebSearchServer {
       cache: cacheStats,
       knowledgeIndex: knowledgeStats,
       memory: memoryStats,
+      entityGraph: this.entityGraph.getStats(),
       recentSearches: [...this.recentTraces].reverse().slice(0, 10),
       browser: this.browser ? "running" : "idle",
       crosslingual: this.enableCrosslingual ? "enabled" : "disabled",
