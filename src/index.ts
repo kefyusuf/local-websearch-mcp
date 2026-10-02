@@ -507,7 +507,16 @@ export class WebSearchServer {
     const baseCacheNamespace = searchPlan
       ? `auto:${searchPlan.profileVersion}:${searchPlan.intent}:${searchPlan.primaryProviderNames.join(",")}`
       : strategy;
-    const cacheNamespace = expand_query ? `${baseCacheNamespace}:expand:v1` : baseCacheNamespace;
+    const executionNamespace = expand_query ? `${baseCacheNamespace}:expand:v1` : baseCacheNamespace;
+    // Filters are exact cache constraints, not semantic similarity signals.
+    const cacheNamespace = normalizedDomain || from_date || to_date
+      ? `${executionNamespace}:filters:v1:${JSON.stringify([normalizedDomain ?? "", from_date ?? "", to_date ?? ""])}`
+      : executionNamespace;
+    const applyFilters = (candidates: SearchResultItem[]) => filterResultsByDate(
+      filterSearchResultsByDomain(candidates, normalizedDomain),
+      from_date || to_date ? { from: from_date, to: to_date } : undefined,
+      { keepUndated: true },
+    );
     const queries = expand_query
       ? expandQuery(query, { maxVariants: 2, context: { intent: searchPlan?.intent } })
       : [query];
@@ -527,7 +536,8 @@ export class WebSearchServer {
     }
 
     trace.startStage("cache.lookup");
-    const cached = await this.cache.get(cacheKey, cacheNamespace);
+    const cacheCandidates = await this.cache.get(cacheKey, cacheNamespace);
+    const cached = cacheCandidates === null ? null : applyFilters(cacheCandidates);
 
     if (cached !== null && cached.length > 0) {
       trace.endStage("cache.lookup", { status: "ok", resultCount: cached.length });
@@ -578,11 +588,7 @@ export class WebSearchServer {
       resultCount: rawResults.length,
     });
 
-    const results = filterResultsByDate(
-      filterSearchResultsByDomain(rawResults, normalizedDomain),
-      from_date || to_date ? { from: from_date, to: to_date } : undefined,
-      { keepUndated: true },
-    );
+    const results = applyFilters(rawResults);
 
     if (results.length === 0) {
       trace.endStage("filters", { status: "empty", resultCount: 0 });
@@ -596,7 +602,8 @@ export class WebSearchServer {
     }
 
     trace.endStage("filters", { status: "ok", resultCount: results.length });
-    await this.cache.set(cacheKey, results, cacheNamespace);
+    // Preserve provider candidates; reapply filters on every hit before output/fetch.
+    await this.cache.set(cacheKey, rawResults, cacheNamespace);
 
     if (!deep) {
       const ranked = this.reranker

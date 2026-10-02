@@ -119,6 +119,8 @@ For package-runner based clients, the command can be `npx` with `args` set to `[
 
 Semantic query cache keys are namespaced by execution strategy (and by plan fingerprint for `auto`), so a cached `fallback` result is never reused for `aggregate` or a different auto plan. Deep-search page content continues to use the normal content cache.
 
+Domain and date bounds are exact cache constraints, isolated from semantic query similarity. Provider candidates are cached and the requested domain/date filters are reapplied on every hit, including before deep page fetching. A cache entry with no eligible candidates triggers provider execution. Namespace filtering happens before the vector-store result limit so unrelated strategies cannot crowd out eligible entries.
+
 `SEARCH_PROVIDERS` is an **allowlist** as well as the configured provider set. Auto routing never activates a provider omitted from `SEARCH_PROVIDERS`; the routing profile only changes ordering and how many configured providers are selected as primary candidates.
 
 For aggregate auto profiles, secondary configured providers are contacted only if **all** selected primary providers return no usable result. A partial primary success is accepted instead of widening the request just to increase result count. This limits scraping load and reduces unnecessary blocking/CAPTCHA exposure.

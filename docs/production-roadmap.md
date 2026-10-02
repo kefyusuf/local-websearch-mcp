@@ -2,6 +2,8 @@
 
 Tarih: 2 Ekim 2026. Durum: araştırma ve kod incelemesine dayalı öneri; bu dosyadaki işler uygulanmış sayılmaz. Kaynaklı sektör karşılaştırması: [araştırma notu](research/2026-10-02-production-benchmark.md).
 
+Uygulama kaydı: ilk geliştirme dalında P0-01'in domain/date cache doğruluğu alt kapsamı TDD ile uygulandı. Namespace filtrelemesi vector-store limiti öncesine alındı; filtered/unfiltered ve deep-hit senaryoları için regression testleri eklendi. Tenant-aware cache/storage ve public auth/isolation bu değişikliğin kapsamına dahil değildir; P0-01'in tamamı bitmiş sayılmaz.
+
 ## 1. Ürün hedefi ve canlı tanımı
 
 Kullanıcının seçtiği ilk canlı hedef: **internete açık, çok kullanıcılı ürün (L3)**. Önerilen ilk segment geliştiriciler ve küçük araştırma ekipleri; hedef kullanım teknik dokümantasyon bulma, TR/EN kaynak araştırması ve bulunan sayfaları kullanıcıya özel, kaynak gösterilebilir bilgiye dönüştürme. Bu segment ve talep pilot kullanıcı görüşmeleriyle doğrulanacak.
@@ -42,7 +44,7 @@ Kod incelemesinden çıkarılan öncelikli riskler:
 
 | ID | Kanıt | Risk ve doğrulama ihtiyacı |
 | --- | --- | --- |
-| R1 | `src/index.ts`: cacheKey tarih aralığını içermiyor; cache-hit dalı date/domain filtrelerine tekrar uğramadan dönüyor | Tarih aralığı değiştirilince cache uygunsuz sonuç verebilir. Domain'in semantik benzer cache üzerinden korunması da test edilmeli. Senaryo regression testi henüz yazılmadı |
+| R1 | İlk incelemede cache tarihi/domain'i kesin kısıt olarak ayırmıyor ve hit'te tekrar filtrelemiyordu | Domain/date namespace + hit'te tekrar filtreleme regression testleriyle düzeltildi. Tenant sınırı henüz uygulanmadı |
 | R2 | Cache, knowledge, memory ve graph aynı DB yolunu kullanıyor; hepsinde MEMORY journal ayarı var | Kalıcı kullanıcı verisi transaction sırasında crash durumunda risk altında. DB politikası ve crash/restore testi gerekiyor. [SQLite belgesi](https://www.sqlite.org/pragma.html#pragma_journal_mode) |
 | R3 | `.nvmrc`/CI Node 24, Docker iki aşamada Node 20; `npm ci --ignore-scripts` kullanıyor | Runtime tutarsız; native SQLite modülünün container'da kurulumu kanıtlanmamış. Container build ve gerçek stdio bağlantısıyla doğrulanmalı |
 | R4 | `ssrf.ts`: DNS hataları boş listeye dönüşüyor; IPv6 metinsel prefix'lerle inceleniyor | Belirsiz DNS davranışı, bracket/IPv4-mapped IPv6, link-local/metadata, rebinding ve bağlantı sırasında hedef değişimi için özel test gerekiyor; bütün bypass'ların doğrulandığı iddia edilmiyor |

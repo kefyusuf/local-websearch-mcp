@@ -9,6 +9,7 @@ Updated: 2026-10-02.
 - Plan-aware semantic caching for all strategies, HTTP-first Markdown fetching with Playwright fallback, domain/date filters, optional reranking, and extractive deep answers.
 - Local FTS5/vector knowledge index, session memory, entity graph, JSON output, search traces, and offline retrieval evaluation.
 - Query rewriting for local-index search. Web multi-query retrieval is available through `expand_query=true`, with at most two additional variants and RRF fusion that retains actual provider provenance.
+- Cache filters now isolate exact domain/date constraints and reapply them before output/deep fetching; namespace filtering precedes vector-store limits, and expired candidates do not hide later valid hits.
 
 ## Development environment
 
