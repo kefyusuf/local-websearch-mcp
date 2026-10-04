@@ -52,8 +52,12 @@ describe("workspace knowledge isolation", () => {
       ? [0.8, 0.6, ...Array(382).fill(0)] : [1, ...Array(383).fill(0)];
     const a = open(context(), true); const b = open(context("tenant-b"), true);
     const own = a.ingest({ title: "Alice", source: "same", content: "Alice private document" });
-    for (let i = 0; i < 5; i++) b.ingest({ title: `Bob-${i}`, source: "same", content: "Bob private document" });
-    await a.flush(); await b.flush();
+    await a.flush();
+    // Three closer foreign hits exhaust search's 3x candidate limit if scope is applied too late.
+    for (let i = 0; i < 3; i++) {
+      b.ingest({ title: `Bob-${i}`, source: "same", content: "Bob private document" });
+      await b.flush();
+    }
     expect(a.getStats().vectorCount).toBe(1);
     const hits = await a.search("absentlexicalterm", 1, { source: "same", embed: model.embed });
     expect(hits.map(h => h.docId)).toEqual([own.id]);
