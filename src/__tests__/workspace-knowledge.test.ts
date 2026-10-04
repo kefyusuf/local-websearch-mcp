@@ -66,8 +66,9 @@ describe("workspace knowledge isolation", () => {
   it("deletes owned FTS/chunks/vectors without deleting foreign data", async () => {
     const a = open(context(), true); const b = open(context("tenant-b"), true);
     const own = a.ingest({ title: "Alice", content: "Private pooling Alice" });
+    await a.flush();
     const foreign = b.ingest({ title: "Bob", content: "Private pooling Bob" });
-    await a.flush(); await b.flush();
+    await b.flush();
     expect(a.deleteDoc(own.id)).toBe(true);
     expect(a.getStats()).toEqual({ docCount: 0, chunkCount: 0, vectorCount: 0 });
     expect(await a.search("pooling", 5, { embed: model.embed })).toEqual([]);
