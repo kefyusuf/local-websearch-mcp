@@ -2,6 +2,10 @@
 
 Updated: 2026-10-06.
 
+Integration checkpoint: the implementation developed in PRs #10 through #26 is consolidated into `main` through sequential merge commits. Each PR is retargeted to `main`, incorporates the preceding main revision, and must pass fresh current-head CI before merging. The dependency security patches are also carried by the first PR so intermediate integration revisions retain patched proxy-addr/source-map-js resolutions. Resume development from verified `main`; the branch/PR checkpoints below describe historical increments rather than an outstanding development stack. The combined verification baseline is 551 unit/regression tests, 30 real PostgreSQL checks, build/typecheck, compiled MCP smoke, dependency audit and package qualification. Check live Git/CI state before relying on this record.
+
+Integration does not enable a public listener, hosted built-in tools or production deployment. Authenticated operator administration, conflict handling, atomic hosted data fencing, issuer/key distribution, distributed resource policy, audit retention/export and production migration/recovery remain release gates. New implementation should follow after the integration checks are complete, with a small open-PR backlog.
+
 Release-gate dependency update: the required audit detected GHSA-jqcg-44mw-7w3h and GHSA-68fv-2mgg-jv7q in the existing lockfile. Only the affected transitive resolutions changed: proxy-addr 2.0.7 to 2.0.8 and source-map-js 1.2.1 to 1.2.2. The subsequent audit reports zero vulnerabilities, and the 551-test suite and compiled MCP smoke pass with the patched dependencies. See the [proxy-addr advisory](https://github.com/advisories/GHSA-jqcg-44mw-7w3h) and [source-map-js advisory](https://github.com/advisories/GHSA-68fv-2mgg-jv7q).
 
 ## Current implementation
