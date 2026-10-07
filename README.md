@@ -1,3 +1,8 @@
+> **Archived — development has moved to [Search Memory MCP](https://github.com/kefyusuf/search-memory-mcp).**
+>
+> Use the new repository for current code, installation instructions, issues and pull requests. This repository is retained as a read-only record of earlier development, reviews and CI results.
+
+
 # Local Web Search MCP Server
 
 Offline-first MCP server for web search, content fetching, and a local knowledge base. It requires no external API keys and uses local models for intent classification, optional cross-lingual search, semantic re-ranking, hybrid retrieval, and extractive deep-search answers.
